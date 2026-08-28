@@ -25,6 +25,8 @@ from ._common import _validate_fromutc_inputs
 
 from ._factories import _TzSingleton, _TzOffsetFactory
 from ._factories import _TzStrFactory
+from .._common import _unfold_rfc_lines
+from .. import _get_provider, _register_provider
 try:
     from .win import tzwin, tzwinlocal
 except ImportError:
@@ -259,7 +261,7 @@ class tzlocal(_tzinfo):
         timestamp = _datetime_to_timestamp(dt)
         return time.localtime(timestamp + time.timezone).tm_isdst
 
-    def _isdst(self, dt, fold_naive=True):
+    def _isdst(self, dt):
         # We can't use mktime here. It is unstable when deciding if
         # the hour near to a change is DST or not.
         #
@@ -485,9 +487,7 @@ class tzfile(_tzinfo):
         for attr in _tzfile.attrs:
             setattr(self, '_' + attr, getattr(tzobj, attr))
 
-    def _read_tzfile(self, fileobj):
-        out = _tzfile()
-
+    def _read_tzfile_header(self, fileobj):
         # From tzfile(5):
         #
         # The time zone information files used by tzset(3)
@@ -527,6 +527,9 @@ class tzfile(_tzinfo):
 
         ) = struct.unpack(">6l", fileobj.read(24))
 
+        return ttisgmtcnt, ttisstdcnt, leapcnt, timecnt, typecnt, charcnt
+
+    def _read_transition_data(self, fileobj, timecnt):
         # The above header is followed by tzh_timecnt four-byte
         # values  of  type long,  sorted  in ascending order.
         # These values are written in ``standard'' byte order.
@@ -535,10 +538,10 @@ class tzfile(_tzinfo):
         # change.
 
         if timecnt:
-            out.trans_list_utc = list(struct.unpack(">%dl" % timecnt,
-                                                    fileobj.read(timecnt*4)))
+            trans_list_utc = list(struct.unpack(">%dl" % timecnt,
+                                                  fileobj.read(timecnt*4)))
         else:
-            out.trans_list_utc = []
+            trans_list_utc = []
 
         # Next come tzh_timecnt one-byte values of type unsigned
         # char; each one tells which of the different types of
@@ -548,11 +551,14 @@ class tzfile(_tzinfo):
         # appears next in the file.
 
         if timecnt:
-            out.trans_idx = struct.unpack(">%dB" % timecnt,
-                                          fileobj.read(timecnt))
+            trans_idx = struct.unpack(">%dB" % timecnt,
+                                      fileobj.read(timecnt))
         else:
-            out.trans_idx = []
+            trans_idx = []
 
+        return trans_list_utc, trans_idx
+
+    def _read_ttinfo_data(self, fileobj, typecnt, charcnt):
         # Each ttinfo structure is written as a four-byte value
         # for tt_gmtoff  of  type long,  in  a  standard  byte
         # order, followed  by a one-byte value for tt_isdst
@@ -570,7 +576,10 @@ class tzfile(_tzinfo):
             ttinfo.append(struct.unpack(">lbb", fileobj.read(6)))
 
         abbr = fileobj.read(charcnt).decode()
+        return ttinfo, abbr
 
+    def _read_tzfile_metadata(self, fileobj, leapcnt, ttisstdcnt,
+                              ttisgmtcnt):
         # Then there are tzh_leapcnt pairs of four-byte
         # values, written in  standard byte  order;  the
         # first  value  of  each pair gives the time (as
@@ -592,6 +601,7 @@ class tzfile(_tzinfo):
         # a time zone file is used in handling POSIX-style
         # time zone environment variables.
 
+        isstd = None
         if ttisstdcnt:
             isstd = struct.unpack(">%db" % ttisstdcnt,
                                   fileobj.read(ttisstdcnt))
@@ -604,10 +614,15 @@ class tzfile(_tzinfo):
         # is used in handling POSIX-style time zone envi-
         # ronment variables.
 
+        isgmt = None
         if ttisgmtcnt:
             isgmt = struct.unpack(">%db" % ttisgmtcnt,
                                   fileobj.read(ttisgmtcnt))
 
+        return isstd, isgmt
+
+    def _build_ttinfo_list(self, out, ttinfo, abbr, typecnt, ttisstdcnt,
+                           ttisgmtcnt, isstd, isgmt):
         # Build ttinfo list
         out.ttinfo_list = []
         for i in range(typecnt):
@@ -626,6 +641,32 @@ class tzfile(_tzinfo):
         # Replace ttinfo indexes for ttinfo objects.
         out.trans_idx = [out.ttinfo_list[idx] for idx in out.trans_idx]
 
+    def _select_ttinfo_candidate(self, out, tti):
+        if not out.ttinfo_std and not tti.isdst:
+            out.ttinfo_std = tti
+        elif not out.ttinfo_dst and tti.isdst:
+            out.ttinfo_dst = tti
+
+        return out.ttinfo_std and out.ttinfo_dst
+
+    def _set_standard_and_dst_ttinfo(self, out, timecnt):
+        for i in range(timecnt-1, -1, -1):
+            tti = out.trans_idx[i]
+            if self._select_ttinfo_candidate(out, tti):
+                break
+        else:
+            if out.ttinfo_dst and not out.ttinfo_std:
+                out.ttinfo_std = out.ttinfo_dst
+
+    def _set_before_ttinfo(self, out):
+        for tti in out.ttinfo_list:
+            if not tti.isdst:
+                out.ttinfo_before = tti
+                break
+        else:
+            out.ttinfo_before = out.ttinfo_list[0]
+
+    def _set_ttinfo(self, out, timecnt):
         # Set standard, dst, and before ttinfos. before will be
         # used when a given time is before any transitions,
         # and will be set to the first non-dst ttinfo, or to
@@ -637,25 +678,43 @@ class tzfile(_tzinfo):
             if not out.trans_list_utc:
                 out.ttinfo_std = out.ttinfo_first = out.ttinfo_list[0]
             else:
-                for i in range(timecnt-1, -1, -1):
-                    tti = out.trans_idx[i]
-                    if not out.ttinfo_std and not tti.isdst:
-                        out.ttinfo_std = tti
-                    elif not out.ttinfo_dst and tti.isdst:
-                        out.ttinfo_dst = tti
+                self._set_standard_and_dst_ttinfo(out, timecnt)
+                self._set_before_ttinfo(out)
 
-                    if out.ttinfo_std and out.ttinfo_dst:
-                        break
-                else:
-                    if out.ttinfo_dst and not out.ttinfo_std:
-                        out.ttinfo_std = out.ttinfo_dst
+    def _get_dst_offset(self, tti, lastdst, lastoffset, lastdstoffset):
+        offset = tti.offset
+        dstoffset = 0
 
-                for tti in out.ttinfo_list:
-                    if not tti.isdst:
-                        out.ttinfo_before = tti
-                        break
-                else:
-                    out.ttinfo_before = out.ttinfo_list[0]
+        if lastdst is not None:
+            if tti.isdst:
+                if not lastdst:
+                    dstoffset = offset - lastoffset
+
+                if not dstoffset and lastdstoffset:
+                    dstoffset = lastdstoffset
+
+                tti.dstoffset = datetime.timedelta(seconds=dstoffset)
+                lastdstoffset = dstoffset
+
+        return dstoffset, lastdstoffset
+
+    def _get_base_offset_adjustment(self, tti, offset, dstoffset,
+                                    lastdst, lastbaseoffset):
+        # If a time zone changes its base offset during a DST transition,
+        # then you need to adjust by the previous base offset to get the
+        # transition time in local time. Otherwise you use the current
+        # base offset. Ideally, I would have some mathematical proof of
+        # why this is true, but I haven't really thought about it enough.
+        baseoffset = offset - dstoffset
+        adjustment = baseoffset
+        if (lastbaseoffset is not None and baseoffset != lastbaseoffset
+                and tti.isdst != lastdst):
+            # The base DST has changed
+            adjustment = lastbaseoffset
+
+        return baseoffset, adjustment
+
+    def _build_transitions(self, out):
 
         # Now fix transition times to become relative to wall time.
         #
@@ -672,36 +731,35 @@ class tzfile(_tzinfo):
 
         for i, tti in enumerate(out.trans_idx):
             offset = tti.offset
-            dstoffset = 0
-
-            if lastdst is not None:
-                if tti.isdst:
-                    if not lastdst:
-                        dstoffset = offset - lastoffset
-
-                    if not dstoffset and lastdstoffset:
-                        dstoffset = lastdstoffset
-
-                    tti.dstoffset = datetime.timedelta(seconds=dstoffset)
-                    lastdstoffset = dstoffset
-
-            # If a time zone changes its base offset during a DST transition,
-            # then you need to adjust by the previous base offset to get the
-            # transition time in local time. Otherwise you use the current
-            # base offset. Ideally, I would have some mathematical proof of
-            # why this is true, but I haven't really thought about it enough.
-            baseoffset = offset - dstoffset
-            adjustment = baseoffset
-            if (lastbaseoffset is not None and baseoffset != lastbaseoffset
-                    and tti.isdst != lastdst):
-                # The base DST has changed
-                adjustment = lastbaseoffset
+            dstoffset, lastdstoffset = self._get_dst_offset(
+                tti, lastdst, lastoffset, lastdstoffset
+            )
+            baseoffset, adjustment = self._get_base_offset_adjustment(
+                tti, offset, dstoffset, lastdst, lastbaseoffset
+            )
 
             lastdst = tti.isdst
             lastoffset = offset
             lastbaseoffset = baseoffset
 
             out.trans_list.append(out.trans_list_utc[i] + adjustment)
+
+    def _read_tzfile(self, fileobj):
+        out = _tzfile()
+
+        (ttisgmtcnt, ttisstdcnt, leapcnt, timecnt,
+         typecnt, charcnt) = self._read_tzfile_header(fileobj)
+        out.trans_list_utc, out.trans_idx = self._read_transition_data(
+            fileobj, timecnt
+        )
+        ttinfo, abbr = self._read_ttinfo_data(fileobj, typecnt, charcnt)
+        isstd, isgmt = self._read_tzfile_metadata(
+            fileobj, leapcnt, ttisstdcnt, ttisgmtcnt
+        )
+        self._build_ttinfo_list(out, ttinfo, abbr, typecnt, ttisstdcnt,
+                                ttisgmtcnt, isstd, isgmt)
+        self._set_ttinfo(out, timecnt)
+        self._build_transitions(out)
 
         out.trans_idx = tuple(out.trans_idx)
         out.trans_list = tuple(out.trans_list)
@@ -869,6 +927,9 @@ class tzfile(_tzinfo):
 
     def __reduce_ex__(self, protocol):
         return (self.__class__, (None, self._filename), self.__dict__)
+
+
+_register_provider("tzfile", tzfile)
 
 
 class tzrange(tzrangebase):
@@ -1077,12 +1138,9 @@ class tzstr(tzrange):
         https://www.gnu.org/software/libc/manual/html_node/TZ-Variable.html
     """
     def __init__(self, s, posix_offset=False):
-        global parser
-        from dateutil.parser import _parser as parser
-
         self._s = s
 
-        res = parser._parsetz(s)
+        res = _get_provider("tzstr_parser")(s)
         if res is None or res.any_unused_tokens:
             raise ValueError("unknown string format")
 
@@ -1262,9 +1320,6 @@ class tzical(object):
     .. _`RFC 5545`: https://tools.ietf.org/html/rfc5545
     """
     def __init__(self, fileobj):
-        global rrule
-        from dateutil import rrule
-
         if isinstance(fileobj, string_types):
             self._s = fileobj
             # ical should be encoded in UTF-8 with CRLF
@@ -1327,22 +1382,65 @@ class tzical(object):
         else:
             raise ValueError("invalid offset: " + s)
 
-    def _parse_rfc(self, s):
+    def _unfold_rfc_lines(self, s):
         lines = s.splitlines()
         if not lines:
             raise ValueError("empty string")
 
-        # Unfold
-        i = 0
-        while i < len(lines):
-            line = lines[i].rstrip()
-            if not line:
-                del lines[i]
-            elif i > 0 and line[0] == " ":
-                lines[i-1] += line[1:]
-                del lines[i]
-            else:
-                i += 1
+        return _unfold_rfc_lines(lines)
+
+    def _parse_rfc_content_line(self, line):
+        name, value = line.split(':', 1)
+        parms = name.split(';')
+        if not parms:
+            raise ValueError("empty property name")
+
+        return parms[0].upper(), value, parms[1:]
+
+    def _build_tzicalvtz(self, tzid, comps, comptype):
+        if comptype:
+            raise ValueError("component not closed: "+comptype)
+        if not tzid:
+            raise ValueError("mandatory TZID not found")
+        if not comps:
+            raise ValueError("at least one component is needed")
+
+        return _tzicalvtz(tzid, comps)
+
+    def _build_tzicalvtzcomp(self, comptype, founddtstart,
+                             tzoffsetfrom, tzoffsetto, tzname, rrulelines):
+        if not founddtstart:
+            raise ValueError("mandatory DTSTART not found")
+        if tzoffsetfrom is None:
+            raise ValueError("mandatory TZOFFSETFROM not found")
+        if tzoffsetto is None:
+            raise ValueError("mandatory TZOFFSETFROM not found")
+
+        rr = None
+        if rrulelines:
+            rrulestr = _get_provider("rrulestr")
+            rr = rrulestr("\n".join(rrulelines),
+                          compatible=True,
+                          ignoretz=True,
+                          cache=True)
+
+        return _tzicalvtzcomp(tzoffsetfrom, tzoffsetto,
+                              (comptype == "DAYLIGHT"), tzname, rr)
+
+    def _parse_rfc_vtimezone_property(self, name, value, parms, tzid):
+        if name == "TZID":
+            if parms:
+                raise ValueError("unsupported TZID parm: "+parms[0])
+            tzid = value
+        elif name in ("TZURL", "LAST-MODIFIED", "COMMENT"):
+            pass
+        else:
+            raise ValueError("unsupported property: "+name)
+
+        return tzid
+
+    def _parse_rfc(self, s):
+        lines = self._unfold_rfc_lines(s)
 
         tzid = None
         comps = []
@@ -1351,12 +1449,7 @@ class tzical(object):
         for line in lines:
             if not line:
                 continue
-            name, value = line.split(':', 1)
-            parms = name.split(';')
-            if not parms:
-                raise ValueError("empty property name")
-            name = parms[0].upper()
-            parms = parms[1:]
+            name, value, parms = self._parse_rfc_content_line(line)
             if invtz:
                 if name == "BEGIN":
                     if value in ("STANDARD", "DAYLIGHT"):
@@ -1372,35 +1465,17 @@ class tzical(object):
                     tzname = None
                 elif name == "END":
                     if value == "VTIMEZONE":
-                        if comptype:
-                            raise ValueError("component not closed: "+comptype)
-                        if not tzid:
-                            raise ValueError("mandatory TZID not found")
-                        if not comps:
-                            raise ValueError(
-                                "at least one component is needed")
                         # Process vtimezone
-                        self._vtz[tzid] = _tzicalvtz(tzid, comps)
+                        self._vtz[tzid] = self._build_tzicalvtz(
+                            tzid, comps, comptype
+                        )
                         invtz = False
                     elif value == comptype:
-                        if not founddtstart:
-                            raise ValueError("mandatory DTSTART not found")
-                        if tzoffsetfrom is None:
-                            raise ValueError(
-                                "mandatory TZOFFSETFROM not found")
-                        if tzoffsetto is None:
-                            raise ValueError(
-                                "mandatory TZOFFSETFROM not found")
                         # Process component
-                        rr = None
-                        if rrulelines:
-                            rr = rrule.rrulestr("\n".join(rrulelines),
-                                                compatible=True,
-                                                ignoretz=True,
-                                                cache=True)
-                        comp = _tzicalvtzcomp(tzoffsetfrom, tzoffsetto,
-                                              (comptype == "DAYLIGHT"),
-                                              tzname, rr)
+                        comp = self._build_tzicalvtzcomp(
+                            comptype, founddtstart, tzoffsetfrom,
+                            tzoffsetto, tzname, rrulelines
+                        )
                         comps.append(comp)
                         comptype = None
                     else:
@@ -1438,15 +1513,9 @@ class tzical(object):
                     else:
                         raise ValueError("unsupported property: "+name)
                 else:
-                    if name == "TZID":
-                        if parms:
-                            raise ValueError(
-                                "unsupported TZID parm: "+parms[0])
-                        tzid = value
-                    elif name in ("TZURL", "LAST-MODIFIED", "COMMENT"):
-                        pass
-                    else:
-                        raise ValueError("unsupported property: "+name)
+                    tzid = self._parse_rfc_vtimezone_property(
+                        name, value, parms, tzid
+                    )
             elif name == "BEGIN" and value == "VTIMEZONE":
                 tzid = None
                 comps = []
@@ -1823,7 +1892,6 @@ else:
         # Python's datetime doesn't accept sub-minute timezones. Check
         # http://python.org/sf/1447945 or https://bugs.python.org/issue5288
         # for some information.
-        old_offset = second_offset
         calculated_offset = 60 * ((second_offset + 30) // 60)
         return calculated_offset
 

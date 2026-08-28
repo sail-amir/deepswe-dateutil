@@ -48,6 +48,7 @@ from warnings import warn
 
 from .. import relativedelta
 from .. import tz
+from .. import _register_provider
 
 __all__ = ["parse", "parserinfo", "ParserError"]
 
@@ -73,6 +74,131 @@ class _timelex(object):
         self.charstack = []
         self.tokenstack = []
         self.eof = False
+
+    def _read_next_char(self):
+        if self.charstack:
+            nextchar = self.charstack.pop(0)
+        else:
+            nextchar = self.instream.read(1)
+            while nextchar == '\x00':
+                nextchar = self.instream.read(1)
+
+        return nextchar
+
+    def _parse_first_token_char(self, nextchar):
+        token = nextchar
+        state = None
+        emit = False
+
+        if self.isword(nextchar):
+            state = 'a'
+        elif self.isnum(nextchar):
+            state = '0'
+        elif self.isspace(nextchar):
+            token = ' '
+            emit = True
+        else:
+            emit = True
+
+        return token, state, emit
+
+    def _parse_word_token_char(self, token, nextchar):
+        if self.isword(nextchar):
+            token += nextchar
+            state = 'a'
+            emit = False
+        elif nextchar == '.':
+            token += nextchar
+            state = 'a.'
+            emit = False
+        else:
+            self.charstack.append(nextchar)
+            state = 'a'
+            emit = True
+
+        return token, state, emit
+
+    def _parse_number_token_char(self, token, nextchar):
+        if self.isnum(nextchar):
+            token += nextchar
+            state = '0'
+            emit = False
+        elif nextchar == '.' or (nextchar == ',' and len(token) >= 2):
+            token += nextchar
+            state = '0.'
+            emit = False
+        else:
+            self.charstack.append(nextchar)
+            state = '0'
+            emit = True
+
+        return token, state, emit
+
+    def _parse_word_dot_token_char(self, token, nextchar):
+        if nextchar == '.' or self.isword(nextchar):
+            token += nextchar
+            state = 'a.'
+            emit = False
+        elif self.isnum(nextchar) and token[-1] == '.':
+            token += nextchar
+            state = '0.'
+            emit = False
+        else:
+            self.charstack.append(nextchar)
+            state = 'a.'
+            emit = True
+
+        return token, state, emit
+
+    def _parse_number_dot_token_char(self, token, nextchar):
+        if nextchar == '.' or self.isnum(nextchar):
+            token += nextchar
+            state = '0.'
+            emit = False
+        elif self.isword(nextchar) and token[-1] == '.':
+            token += nextchar
+            state = 'a.'
+            emit = False
+        else:
+            self.charstack.append(nextchar)
+            state = '0.'
+            emit = True
+
+        return token, state, emit
+
+    def _parse_token_char(self, token, state, seenletters, nextchar):
+        if not state:
+            token, state, emit = self._parse_first_token_char(nextchar)
+        elif state == 'a':
+            seenletters = True
+            token, state, emit = self._parse_word_token_char(token, nextchar)
+        elif state == '0':
+            token, state, emit = self._parse_number_token_char(token, nextchar)
+        elif state == 'a.':
+            seenletters = True
+            token, state, emit = self._parse_word_dot_token_char(
+                token, nextchar
+            )
+        elif state == '0.':
+            token, state, emit = self._parse_number_dot_token_char(
+                token, nextchar
+            )
+
+        return token, state, seenletters, emit
+
+    def _split_ambiguous_token(self, token, state, seenletters):
+        if (state in ('a.', '0.') and (seenletters or token.count('.') > 1 or
+                                       token[-1] in '.,')):
+            l = self._split_decimal.split(token)
+            token = l[0]
+            for tok in l[1:]:
+                if tok:
+                    self.tokenstack.append(tok)
+
+        if state == '0.' and token.count('.') == 0:
+            token = token.replace(',', '.')
+
+        return token
 
     def get_token(self):
         """
@@ -100,88 +226,19 @@ class _timelex(object):
             # find a character that's not part of the current token - since
             # that character may be part of the next token, it's stored in the
             # charstack.
-            if self.charstack:
-                nextchar = self.charstack.pop(0)
-            else:
-                nextchar = self.instream.read(1)
-                while nextchar == '\x00':
-                    nextchar = self.instream.read(1)
+            nextchar = self._read_next_char()
 
             if not nextchar:
                 self.eof = True
                 break
-            elif not state:
-                # First character of the token - determines if we're starting
-                # to parse a word, a number or something else.
-                token = nextchar
-                if self.isword(nextchar):
-                    state = 'a'
-                elif self.isnum(nextchar):
-                    state = '0'
-                elif self.isspace(nextchar):
-                    token = ' '
-                    break  # emit token
-                else:
-                    break  # emit token
-            elif state == 'a':
-                # If we've already started reading a word, we keep reading
-                # letters until we find something that's not part of a word.
-                seenletters = True
-                if self.isword(nextchar):
-                    token += nextchar
-                elif nextchar == '.':
-                    token += nextchar
-                    state = 'a.'
-                else:
-                    self.charstack.append(nextchar)
-                    break  # emit token
-            elif state == '0':
-                # If we've already started reading a number, we keep reading
-                # numbers until we find something that doesn't fit.
-                if self.isnum(nextchar):
-                    token += nextchar
-                elif nextchar == '.' or (nextchar == ',' and len(token) >= 2):
-                    token += nextchar
-                    state = '0.'
-                else:
-                    self.charstack.append(nextchar)
-                    break  # emit token
-            elif state == 'a.':
-                # If we've seen some letters and a dot separator, continue
-                # parsing, and the tokens will be broken up later.
-                seenletters = True
-                if nextchar == '.' or self.isword(nextchar):
-                    token += nextchar
-                elif self.isnum(nextchar) and token[-1] == '.':
-                    token += nextchar
-                    state = '0.'
-                else:
-                    self.charstack.append(nextchar)
-                    break  # emit token
-            elif state == '0.':
-                # If we've seen at least one dot separator, keep going, we'll
-                # break up the tokens later.
-                if nextchar == '.' or self.isnum(nextchar):
-                    token += nextchar
-                elif self.isword(nextchar) and token[-1] == '.':
-                    token += nextchar
-                    state = 'a.'
-                else:
-                    self.charstack.append(nextchar)
-                    break  # emit token
 
-        if (state in ('a.', '0.') and (seenletters or token.count('.') > 1 or
-                                       token[-1] in '.,')):
-            l = self._split_decimal.split(token)
-            token = l[0]
-            for tok in l[1:]:
-                if tok:
-                    self.tokenstack.append(tok)
+            token, state, seenletters, emit = self._parse_token_char(
+                token, state, seenletters, nextchar
+            )
+            if emit:
+                break  # emit token
 
-        if state == '0.' and token.count('.') == 0:
-            token = token.replace(',', '.')
-
-        return token
+        return self._split_ambiguous_token(token, state, seenletters)
 
     def __iter__(self):
         return self
@@ -310,8 +367,8 @@ class parserinfo(object):
         dct = {}
         for i, v in enumerate(lst):
             if isinstance(v, tuple):
-                for v in v:
-                    dct[v.lower()] = i
+                for value in v:
+                    dct[value.lower()] = i
             else:
                 dct[v.lower()] = i
         return dct
@@ -471,6 +528,100 @@ class _ymd(list):
         out = {key: self[strids[key]] for key in strids}
         return (out.get('y'), out.get('m'), out.get('d'))
 
+    def _resolve_one_or_month_string(self, len_ymd, mstridx):
+        year, month, day = (None, None, None)
+
+        if mstridx is not None:
+            month = self[mstridx]
+            # since mstridx is 0 or 1, self[mstridx-1] always
+            # looks up the other element
+            other = self[mstridx - 1]
+        else:
+            other = self[0]
+
+        if len_ymd > 1 or mstridx is None:
+            if other > 31:
+                year = other
+            else:
+                day = other
+
+        return year, month, day
+
+    def _resolve_two(self, dayfirst):
+        if self[0] > 31:
+            # 99-01
+            year, month = self
+            day = None
+        elif self[1] > 31:
+            # 01-99
+            month, year = self
+            day = None
+        elif dayfirst and self[1] <= 12:
+            # 13-01
+            day, month = self
+            year = None
+        else:
+            # 01-13
+            month, day = self
+            year = None
+
+        return year, month, day
+
+    def _resolve_three_mstridx_zero(self):
+        if self[1] > 31:
+            # Apr-2003-25
+            month, year, day = self
+        else:
+            month, day, year = self
+
+        return year, month, day
+
+    def _resolve_three_mstridx_one(self, yearfirst):
+        if self[0] > 31 or (yearfirst and self[2] <= 31):
+            # 99-Jan-01
+            year, month, day = self
+        else:
+            # 01-Jan-01
+            # Give precedence to day-first, since
+            # two-digit years is usually hand-written.
+            day, month, year = self
+
+        return year, month, day
+
+    def _resolve_three_mstridx_two(self):
+        # WTF!?
+        if self[1] > 31:
+            # 01-99-Jan
+            day, year, month = self
+        else:
+            # 99-01-Jan
+            year, day, month = self
+
+        return year, month, day
+
+    def _resolve_three_year_first(self, dayfirst):
+        # 99-01-01
+        if dayfirst and self[2] <= 12:
+            year, day, month = self
+        else:
+            year, month, day = self
+
+        return year, month, day
+
+    def _resolve_three_without_month_string(self, yearfirst, dayfirst):
+        if (self[0] > 31 or
+            self.ystridx == 0 or
+                (yearfirst and self[1] <= 12 and self[2] <= 31)):
+            return self._resolve_three_year_first(dayfirst)
+        elif self[0] > 12 or (dayfirst and self[1] <= 12):
+            # 13-01-01
+            day, month, year = self
+        else:
+            # 01-13-01
+            month, day, year = self
+
+        return year, month, day
+
     def resolve_ymd(self, yearfirst, dayfirst):
         len_ymd = len(self)
         year, month, day = (None, None, None)
@@ -490,77 +641,24 @@ class _ymd(list):
             raise ValueError("More than three YMD values")
         elif len_ymd == 1 or (mstridx is not None and len_ymd == 2):
             # One member, or two members with a month string
-            if mstridx is not None:
-                month = self[mstridx]
-                # since mstridx is 0 or 1, self[mstridx-1] always
-                # looks up the other element
-                other = self[mstridx - 1]
-            else:
-                other = self[0]
-
-            if len_ymd > 1 or mstridx is None:
-                if other > 31:
-                    year = other
-                else:
-                    day = other
+            return self._resolve_one_or_month_string(len_ymd, mstridx)
 
         elif len_ymd == 2:
             # Two members with numbers
-            if self[0] > 31:
-                # 99-01
-                year, month = self
-            elif self[1] > 31:
-                # 01-99
-                month, year = self
-            elif dayfirst and self[1] <= 12:
-                # 13-01
-                day, month = self
-            else:
-                # 01-13
-                month, day = self
+            return self._resolve_two(dayfirst)
 
         elif len_ymd == 3:
             # Three members
             if mstridx == 0:
-                if self[1] > 31:
-                    # Apr-2003-25
-                    month, year, day = self
-                else:
-                    month, day, year = self
+                return self._resolve_three_mstridx_zero()
             elif mstridx == 1:
-                if self[0] > 31 or (yearfirst and self[2] <= 31):
-                    # 99-Jan-01
-                    year, month, day = self
-                else:
-                    # 01-Jan-01
-                    # Give precedence to day-first, since
-                    # two-digit years is usually hand-written.
-                    day, month, year = self
-
+                return self._resolve_three_mstridx_one(yearfirst)
             elif mstridx == 2:
-                # WTF!?
-                if self[1] > 31:
-                    # 01-99-Jan
-                    day, year, month = self
-                else:
-                    # 99-01-Jan
-                    year, day, month = self
-
+                return self._resolve_three_mstridx_two()
             else:
-                if (self[0] > 31 or
-                    self.ystridx == 0 or
-                        (yearfirst and self[1] <= 12 and self[2] <= 31)):
-                    # 99-01-01
-                    if dayfirst and self[2] <= 12:
-                        year, day, month = self
-                    else:
-                        year, month, day = self
-                elif self[0] > 12 or (dayfirst and self[1] <= 12):
-                    # 13-01-01
-                    day, month, year = self
-                else:
-                    # 01-13-01
-                    month, day, year = self
+                return self._resolve_three_without_month_string(
+                    yearfirst, dayfirst
+                )
 
         return year, month, day
 
@@ -663,6 +761,150 @@ class parser(object):
                      "hour", "minute", "second", "microsecond",
                      "tzname", "tzoffset", "ampm","any_unused_tokens"]
 
+    def _parse_weekday_token(self, token, info, res):
+        value = info.weekday(token)
+        res.weekday = value
+
+    def _parse_month_token(self, l, i, info, ymd, len_l):
+        value = info.month(l[i])
+        ymd.append(value, 'M')
+
+        if i + 1 < len_l:
+            if l[i + 1] in ('-', '/'):
+                # Jan-01[-99]
+                sep = l[i + 1]
+                ymd.append(l[i + 2])
+
+                if i + 3 < len_l and l[i + 3] == sep:
+                    # Jan-01-99
+                    ymd.append(l[i + 4])
+                    i += 2
+
+                i += 2
+
+            elif (i + 4 < len_l and l[i + 1] == l[i + 3] == ' ' and
+                  info.pertain(l[i + 2])):
+                # Jan of 01
+                # In this case, 01 is clearly year
+                if l[i + 4].isdigit():
+                    # Convert it here to become unambiguous
+                    value = int(l[i + 4])
+                    year = str(info.convertyear(value))
+                    ymd.append(year, 'Y')
+                else:
+                    # Wrong guess
+                    pass
+                    # TODO: not hit in tests
+                i += 4
+
+        return i
+
+    def _parse_ampm_name(self, l, i, info, res, fuzzy, skipped_idxs):
+        value = info.ampm(l[i])
+        val_is_ampm = self._ampm_valid(res.hour, res.ampm, fuzzy)
+
+        if val_is_ampm:
+            res.hour = self._adjust_ampm(res.hour, value)
+            res.ampm = value
+
+        elif fuzzy:
+            skipped_idxs.append(i)
+
+    def _parse_tzname_token(self, l, i, info, res, len_l):
+        res.tzname = l[i]
+        res.tzoffset = info.tzoffset(res.tzname)
+
+        # Check for something like GMT+3, or BRST+3. Notice
+        # that it doesn't mean "I am 3 hours after GMT", but
+        # "my time +3 is GMT". If found, we reverse the
+        # logic so that timezone parsing code will get it
+        # right.
+        if i + 1 < len_l and l[i + 1] in ('+', '-'):
+            l[i + 1] = ('+', '-')[l[i + 1] == '+']
+            res.tzoffset = None
+            if info.utczone(res.tzname):
+                # With something like GMT+3, the timezone
+                # is *not* GMT.
+                res.tzname = None
+
+    def _parse_tzoffset_values(self, timestr, l, i, len_l):
+        len_li = len(l[i + 1])
+
+        # TODO: check that l[i + 1] is integer?
+        if len_li == 4:
+            # -0300
+            hour_offset = int(l[i + 1][:2])
+            min_offset = int(l[i + 1][2:])
+        elif i + 2 < len_l and l[i + 2] == ':':
+            # -03:00
+            hour_offset = int(l[i + 1])
+            min_offset = int(l[i + 3])  # TODO: Check that l[i+3] is minute-like?
+            i += 2
+        elif len_li <= 2:
+            # -[0]3
+            hour_offset = int(l[i + 1][:2])
+            min_offset = 0
+        else:
+            raise ValueError(timestr)
+
+        return hour_offset, min_offset, i
+
+    def _parse_parenthesized_tzname(self, l, i, info, res, len_l):
+        # Look for a timezone name between parenthesis
+        if (i + 5 < len_l and
+                info.jump(l[i + 2]) and l[i + 3] == '(' and
+                l[i + 5] == ')' and
+                3 <= len(l[i + 4]) and
+                self._could_be_tzname(res.hour, res.tzname,
+                                      None, l[i + 4])):
+            # -0300 (BRST)
+            res.tzname = l[i + 4]
+            i += 4
+
+        return i
+
+    def _parse_numbered_timezone(self, timestr, l, i, info, res, len_l):
+        signal = (-1, 1)[l[i] == '+']
+        hour_offset, min_offset, i = self._parse_tzoffset_values(
+            timestr, l, i, len_l
+        )
+        res.tzoffset = signal * (hour_offset * 3600 + min_offset * 60)
+        i = self._parse_parenthesized_tzname(l, i, info, res, len_l)
+        return i + 1
+
+    def _parse_nonnumeric_token(self, timestr, l, i, info, ymd, res, fuzzy,
+                                skipped_idxs, len_l):
+        # Check weekday
+        if info.weekday(l[i]) is not None:
+            self._parse_weekday_token(l[i], info, res)
+
+        # Check month name
+        elif info.month(l[i]) is not None:
+            i = self._parse_month_token(l, i, info, ymd, len_l)
+
+        # Check am/pm
+        elif info.ampm(l[i]) is not None:
+            self._parse_ampm_name(l, i, info, res, fuzzy, skipped_idxs)
+
+        # Check for a timezone name
+        elif self._could_be_tzname(res.hour, res.tzname, res.tzoffset, l[i]):
+            self._parse_tzname_token(l, i, info, res, len_l)
+
+        # Check for a numbered timezone
+        elif res.hour is not None and l[i] in ('+', '-'):
+            i = self._parse_numbered_timezone(
+                timestr, l, i, info, res, len_l
+            )
+
+        # Check jumps
+        elif not (info.jump(l[i]) or fuzzy):
+            raise ValueError(timestr)
+
+        else:
+            skipped_idxs.append(i)
+
+        return i
+
     def _parse(self, timestr, dayfirst=None, yearfirst=None, fuzzy=False,
                fuzzy_with_tokens=False):
         """
@@ -739,117 +981,11 @@ class parser(object):
                     # Numeric token
                     i = self._parse_numeric_token(l, i, info, ymd, res, fuzzy)
 
-                # Check weekday
-                elif info.weekday(l[i]) is not None:
-                    value = info.weekday(l[i])
-                    res.weekday = value
-
-                # Check month name
-                elif info.month(l[i]) is not None:
-                    value = info.month(l[i])
-                    ymd.append(value, 'M')
-
-                    if i + 1 < len_l:
-                        if l[i + 1] in ('-', '/'):
-                            # Jan-01[-99]
-                            sep = l[i + 1]
-                            ymd.append(l[i + 2])
-
-                            if i + 3 < len_l and l[i + 3] == sep:
-                                # Jan-01-99
-                                ymd.append(l[i + 4])
-                                i += 2
-
-                            i += 2
-
-                        elif (i + 4 < len_l and l[i + 1] == l[i + 3] == ' ' and
-                              info.pertain(l[i + 2])):
-                            # Jan of 01
-                            # In this case, 01 is clearly year
-                            if l[i + 4].isdigit():
-                                # Convert it here to become unambiguous
-                                value = int(l[i + 4])
-                                year = str(info.convertyear(value))
-                                ymd.append(year, 'Y')
-                            else:
-                                # Wrong guess
-                                pass
-                                # TODO: not hit in tests
-                            i += 4
-
-                # Check am/pm
-                elif info.ampm(l[i]) is not None:
-                    value = info.ampm(l[i])
-                    val_is_ampm = self._ampm_valid(res.hour, res.ampm, fuzzy)
-
-                    if val_is_ampm:
-                        res.hour = self._adjust_ampm(res.hour, value)
-                        res.ampm = value
-
-                    elif fuzzy:
-                        skipped_idxs.append(i)
-
-                # Check for a timezone name
-                elif self._could_be_tzname(res.hour, res.tzname, res.tzoffset, l[i]):
-                    res.tzname = l[i]
-                    res.tzoffset = info.tzoffset(res.tzname)
-
-                    # Check for something like GMT+3, or BRST+3. Notice
-                    # that it doesn't mean "I am 3 hours after GMT", but
-                    # "my time +3 is GMT". If found, we reverse the
-                    # logic so that timezone parsing code will get it
-                    # right.
-                    if i + 1 < len_l and l[i + 1] in ('+', '-'):
-                        l[i + 1] = ('+', '-')[l[i + 1] == '+']
-                        res.tzoffset = None
-                        if info.utczone(res.tzname):
-                            # With something like GMT+3, the timezone
-                            # is *not* GMT.
-                            res.tzname = None
-
-                # Check for a numbered timezone
-                elif res.hour is not None and l[i] in ('+', '-'):
-                    signal = (-1, 1)[l[i] == '+']
-                    len_li = len(l[i + 1])
-
-                    # TODO: check that l[i + 1] is integer?
-                    if len_li == 4:
-                        # -0300
-                        hour_offset = int(l[i + 1][:2])
-                        min_offset = int(l[i + 1][2:])
-                    elif i + 2 < len_l and l[i + 2] == ':':
-                        # -03:00
-                        hour_offset = int(l[i + 1])
-                        min_offset = int(l[i + 3])  # TODO: Check that l[i+3] is minute-like?
-                        i += 2
-                    elif len_li <= 2:
-                        # -[0]3
-                        hour_offset = int(l[i + 1][:2])
-                        min_offset = 0
-                    else:
-                        raise ValueError(timestr)
-
-                    res.tzoffset = signal * (hour_offset * 3600 + min_offset * 60)
-
-                    # Look for a timezone name between parenthesis
-                    if (i + 5 < len_l and
-                            info.jump(l[i + 2]) and l[i + 3] == '(' and
-                            l[i + 5] == ')' and
-                            3 <= len(l[i + 4]) and
-                            self._could_be_tzname(res.hour, res.tzname,
-                                                  None, l[i + 4])):
-                        # -0300 (BRST)
-                        res.tzname = l[i + 4]
-                        i += 4
-
-                    i += 1
-
-                # Check jumps
-                elif not (info.jump(l[i]) or fuzzy):
-                    raise ValueError(timestr)
-
                 else:
-                    skipped_idxs.append(i)
+                    i = self._parse_nonnumeric_token(
+                        timestr, l, i, info, ymd, res, fuzzy,
+                        skipped_idxs, len_l
+                    )
                 i += 1
 
             # Process year/month/day
@@ -872,6 +1008,172 @@ class parser(object):
         else:
             return res, None
 
+    def _is_compact_time_after_ymd(self, tokens, idx, info, ymd, res,
+                                   len_li, len_l):
+        return (len(ymd) == 3 and len_li in (2, 4) and
+                res.hour is None and
+                (idx + 1 >= len_l or
+                 (tokens[idx + 1] != ':' and
+                  info.hms(tokens[idx + 1]) is None)))
+
+    def _is_six_digit_token(self, tokens, idx, len_li):
+        return (len_li == 6 or
+                (len_li > 6 and tokens[idx].find('.') == 6))
+
+    def _parse_compact_time_after_ymd(self, tokens, idx, res, len_li):
+        # 19990101T23[59]
+        s = tokens[idx]
+        res.hour = int(s[:2])
+
+        if len_li == 4:
+            res.minute = int(s[2:])
+
+    def _parse_six_digit_token(self, tokens, idx, ymd, res):
+        # YYMMDD or HHMMSS[.ss]
+        s = tokens[idx]
+
+        if not ymd and '.' not in tokens[idx]:
+            ymd.append(s[:2])
+            ymd.append(s[2:4])
+            ymd.append(s[4:])
+        else:
+            # 19990101T235959[.59]
+
+            # TODO: Check if res attributes already set.
+            res.hour = int(s[:2])
+            res.minute = int(s[2:4])
+            res.second, res.microsecond = self._parsems(s[4:])
+
+    def _parse_compact_date(self, tokens, idx, ymd, res, len_li):
+        # YYYYMMDD
+        s = tokens[idx]
+        ymd.append(s[:4], 'Y')
+        ymd.append(s[4:6])
+        ymd.append(s[6:8])
+
+        if len_li > 8:
+            res.hour = int(s[8:10])
+            res.minute = int(s[10:12])
+
+            if len_li > 12:
+                res.second = int(s[12:])
+
+    def _parse_compact_numeric_token(self, tokens, idx, info, ymd, res,
+                                     len_li, len_l):
+        if self._is_compact_time_after_ymd(tokens, idx, info, ymd, res,
+                                           len_li, len_l):
+            self._parse_compact_time_after_ymd(tokens, idx, res, len_li)
+        elif self._is_six_digit_token(tokens, idx, len_li):
+            self._parse_six_digit_token(tokens, idx, ymd, res)
+        elif len_li in (8, 12, 14):
+            self._parse_compact_date(tokens, idx, ymd, res, len_li)
+        else:
+            return False
+
+        return True
+
+    def _parse_labeled_hms(self, tokens, idx, info, res, value_repr):
+        # HH[ ]h or MM[ ]m or SS[.ss][ ]s
+        hms_idx = self._find_hms_idx(idx, tokens, info, allow_jump=True)
+        (idx, hms) = self._parse_hms(idx, tokens, info, hms_idx)
+        if hms is not None:
+            # TODO: checking that hour/minute/second are not
+            # already set?
+            self._assign_hms(res, value_repr, hms)
+        return idx
+
+    def _parse_colon_time(self, tokens, idx, res, value, len_l):
+        # HH:MM[:SS[.ss]]
+        res.hour = int(value)
+        value = self._to_decimal(tokens[idx + 2])  # TODO: try/except for this?
+        (res.minute, res.second) = self._parse_min_sec(value)
+
+        if idx + 4 < len_l and tokens[idx + 3] == ':':
+            res.second, res.microsecond = self._parsems(tokens[idx + 4])
+
+            idx += 2
+
+        idx += 2
+        return idx
+
+    def _parse_time_numeric_token(self, tokens, idx, info, res, value_repr,
+                                  value, len_l):
+        if self._find_hms_idx(idx, tokens, info, allow_jump=True) is not None:
+            idx = self._parse_labeled_hms(tokens, idx, info, res, value_repr)
+        elif idx + 2 < len_l and tokens[idx + 1] == ':':
+            idx = self._parse_colon_time(tokens, idx, res, value, len_l)
+        else:
+            return False, idx
+
+        return True, idx
+
+    def _parse_separated_ymd(self, tokens, idx, info, ymd, value_repr,
+                             len_l):
+        sep = tokens[idx + 1]
+        ymd.append(value_repr)
+
+        if idx + 2 < len_l and not info.jump(tokens[idx + 2]):
+            if tokens[idx + 2].isdigit():
+                # 01-01[-01]
+                ymd.append(tokens[idx + 2])
+            else:
+                # 01-Jan[-01]
+                value = info.month(tokens[idx + 2])
+
+                if value is not None:
+                    ymd.append(value, 'M')
+                else:
+                    raise ValueError()
+
+            if idx + 3 < len_l and tokens[idx + 3] == sep:
+                # We have three members
+                value = info.month(tokens[idx + 4])
+
+                if value is not None:
+                    ymd.append(value, 'M')
+                else:
+                    ymd.append(tokens[idx + 4])
+                idx += 2
+
+            idx += 1
+        idx += 1
+        return idx
+
+    def _parse_number_at_end(self, tokens, idx, info, ymd, res, value, len_l):
+        if idx + 2 < len_l and info.ampm(tokens[idx + 2]) is not None:
+            # 12 am
+            hour = int(value)
+            res.hour = self._adjust_ampm(hour, info.ampm(tokens[idx + 2]))
+            idx += 1
+        else:
+            # Year, month or day
+            ymd.append(value)
+        idx += 1
+        return idx
+
+    def _parse_ampm_token(self, tokens, idx, info, res, value):
+        # 12am
+        hour = int(value)
+        res.hour = self._adjust_ampm(hour, info.ampm(tokens[idx + 1]))
+        return idx + 1
+
+    def _parse_date_numeric_token(self, tokens, idx, info, ymd, res, fuzzy,
+                                  value_repr, value, len_l):
+        if idx + 1 < len_l and tokens[idx + 1] in ('-', '/', '.'):
+            idx = self._parse_separated_ymd(tokens, idx, info, ymd,
+                                            value_repr, len_l)
+        elif idx + 1 >= len_l or info.jump(tokens[idx + 1]):
+            idx = self._parse_number_at_end(tokens, idx, info, ymd, res,
+                                            value, len_l)
+        elif info.ampm(tokens[idx + 1]) is not None and (0 <= value < 24):
+            idx = self._parse_ampm_token(tokens, idx, info, res, value)
+        elif ymd.could_be_day(value):
+            ymd.append(value)
+        elif not fuzzy:
+            raise ValueError()
+
+        return idx
+
     def _parse_numeric_token(self, tokens, idx, info, ymd, res, fuzzy):
         # Token is a number
         value_repr = tokens[idx]
@@ -881,127 +1183,21 @@ class parser(object):
             six.raise_from(ValueError('Unknown numeric token'), e)
 
         len_li = len(value_repr)
-
         len_l = len(tokens)
 
-        if (len(ymd) == 3 and len_li in (2, 4) and
-            res.hour is None and
-            (idx + 1 >= len_l or
-             (tokens[idx + 1] != ':' and
-              info.hms(tokens[idx + 1]) is None))):
-            # 19990101T23[59]
-            s = tokens[idx]
-            res.hour = int(s[:2])
+        if self._parse_compact_numeric_token(tokens, idx, info, ymd, res,
+                                             len_li, len_l):
+            return idx
 
-            if len_li == 4:
-                res.minute = int(s[2:])
+        parsed, idx = self._parse_time_numeric_token(
+            tokens, idx, info, res, value_repr, value, len_l
+        )
+        if parsed:
+            return idx
 
-        elif len_li == 6 or (len_li > 6 and tokens[idx].find('.') == 6):
-            # YYMMDD or HHMMSS[.ss]
-            s = tokens[idx]
-
-            if not ymd and '.' not in tokens[idx]:
-                ymd.append(s[:2])
-                ymd.append(s[2:4])
-                ymd.append(s[4:])
-            else:
-                # 19990101T235959[.59]
-
-                # TODO: Check if res attributes already set.
-                res.hour = int(s[:2])
-                res.minute = int(s[2:4])
-                res.second, res.microsecond = self._parsems(s[4:])
-
-        elif len_li in (8, 12, 14):
-            # YYYYMMDD
-            s = tokens[idx]
-            ymd.append(s[:4], 'Y')
-            ymd.append(s[4:6])
-            ymd.append(s[6:8])
-
-            if len_li > 8:
-                res.hour = int(s[8:10])
-                res.minute = int(s[10:12])
-
-                if len_li > 12:
-                    res.second = int(s[12:])
-
-        elif self._find_hms_idx(idx, tokens, info, allow_jump=True) is not None:
-            # HH[ ]h or MM[ ]m or SS[.ss][ ]s
-            hms_idx = self._find_hms_idx(idx, tokens, info, allow_jump=True)
-            (idx, hms) = self._parse_hms(idx, tokens, info, hms_idx)
-            if hms is not None:
-                # TODO: checking that hour/minute/second are not
-                # already set?
-                self._assign_hms(res, value_repr, hms)
-
-        elif idx + 2 < len_l and tokens[idx + 1] == ':':
-            # HH:MM[:SS[.ss]]
-            res.hour = int(value)
-            value = self._to_decimal(tokens[idx + 2])  # TODO: try/except for this?
-            (res.minute, res.second) = self._parse_min_sec(value)
-
-            if idx + 4 < len_l and tokens[idx + 3] == ':':
-                res.second, res.microsecond = self._parsems(tokens[idx + 4])
-
-                idx += 2
-
-            idx += 2
-
-        elif idx + 1 < len_l and tokens[idx + 1] in ('-', '/', '.'):
-            sep = tokens[idx + 1]
-            ymd.append(value_repr)
-
-            if idx + 2 < len_l and not info.jump(tokens[idx + 2]):
-                if tokens[idx + 2].isdigit():
-                    # 01-01[-01]
-                    ymd.append(tokens[idx + 2])
-                else:
-                    # 01-Jan[-01]
-                    value = info.month(tokens[idx + 2])
-
-                    if value is not None:
-                        ymd.append(value, 'M')
-                    else:
-                        raise ValueError()
-
-                if idx + 3 < len_l and tokens[idx + 3] == sep:
-                    # We have three members
-                    value = info.month(tokens[idx + 4])
-
-                    if value is not None:
-                        ymd.append(value, 'M')
-                    else:
-                        ymd.append(tokens[idx + 4])
-                    idx += 2
-
-                idx += 1
-            idx += 1
-
-        elif idx + 1 >= len_l or info.jump(tokens[idx + 1]):
-            if idx + 2 < len_l and info.ampm(tokens[idx + 2]) is not None:
-                # 12 am
-                hour = int(value)
-                res.hour = self._adjust_ampm(hour, info.ampm(tokens[idx + 2]))
-                idx += 1
-            else:
-                # Year, month or day
-                ymd.append(value)
-            idx += 1
-
-        elif info.ampm(tokens[idx + 1]) is not None and (0 <= value < 24):
-            # 12am
-            hour = int(value)
-            res.hour = self._adjust_ampm(hour, info.ampm(tokens[idx + 1]))
-            idx += 1
-
-        elif ymd.could_be_day(value):
-            ymd.append(value)
-
-        elif not fuzzy:
-            raise ValueError()
-
-        return idx
+        return self._parse_date_numeric_token(
+            tokens, idx, info, ymd, res, fuzzy, value_repr, value, len_l
+        )
 
     def _find_hms_idx(self, idx, tokens, info, allow_jump):
         len_l = len(tokens)
@@ -1387,189 +1583,231 @@ class _tzparser(object):
             self.start = self._attr()
             self.end = self._attr()
 
+    def _find_tzname_end(self, l, i, len_l):
+        j = i
+        while j < len_l and not [x for x in l[j]
+                                 if x in "0123456789:,-+"]:
+            j += 1
+        return j
+
+    def _set_tz_abbreviation(self, res, l, i, j):
+        if not res.stdabbr:
+            offattr = "stdoffset"
+            res.stdabbr = "".join(l[i:j])
+        else:
+            offattr = "dstoffset"
+            res.dstabbr = "".join(l[i:j])
+        return offattr
+
+    def _parse_tz_offset(self, res, l, i, len_l, offattr, used_idxs):
+        if (i < len_l and (l[i] in ('+', '-') or l[i][0] in
+                           "0123456789")):
+            if l[i] in ('+', '-'):
+                # Yes, that's right.  See the TZ variable documentation.
+                signal = (1, -1)[l[i] == '+']
+                used_idxs.append(i)
+                i += 1
+            else:
+                signal = -1
+            len_li = len(l[i])
+            if len_li == 4:
+                # -0300
+                setattr(res, offattr, (int(l[i][:2]) * 3600 +
+                                       int(l[i][2:]) * 60) * signal)
+            elif i + 1 < len_l and l[i + 1] == ':':
+                # -03:00
+                setattr(res, offattr,
+                        (int(l[i]) * 3600 + int(l[i + 2]) * 60) * signal)
+                used_idxs.append(i)
+                i += 2
+            elif len_li <= 2:
+                # -[0]3
+                setattr(res, offattr, int(l[i][:2]) * 3600 * signal)
+            else:
+                return None
+            used_idxs.append(i)
+            i += 1
+        return i
+
+    def _parse_tzname_and_offsets(self, res, l, used_idxs, len_l):
+        i = 0
+        while i < len_l:
+            # BRST+3[BRDT[+2]]
+            j = self._find_tzname_end(l, i, len_l)
+            if j != i:
+                offattr = self._set_tz_abbreviation(res, l, i, j)
+
+                for ii in range(j):
+                    used_idxs.append(ii)
+                i = j
+                i = self._parse_tz_offset(res, l, i, len_l, offattr,
+                                          used_idxs)
+                if i is None:
+                    return None
+                if res.dstabbr:
+                    break
+            else:
+                break
+        return i
+
+    def _prepare_tz_rules(self, l, i, len_l):
+        if i < len_l:
+            for j in range(i, len_l):
+                if l[j] == ';':
+                    l[j] = ','
+
+            assert l[i] == ','
+            i += 1
+        return i
+
+    def _is_legacy_tz_rule(self, l, i):
+        return (8 <= l.count(',') <= 9 and
+                not [y for x in l[i:] if x != ','
+                     for y in x if y not in "0123456789+-"])
+
+    def _parse_legacy_tz_rule(self, res, l, i, len_l, used_idxs):
+        # GMT0BST,3,0,30,3600,10,0,26,7200[,3600]
+        for x in (res.start, res.end):
+            x.month = int(l[i])
+            used_idxs.append(i)
+            i += 2
+            if l[i] == '-':
+                value = int(l[i + 1]) * -1
+                used_idxs.append(i)
+                i += 1
+            else:
+                value = int(l[i])
+            used_idxs.append(i)
+            i += 2
+            if value:
+                x.week = value
+                x.weekday = (int(l[i]) - 1) % 7
+            else:
+                x.day = int(l[i])
+            used_idxs.append(i)
+            i += 2
+            x.time = int(l[i])
+            used_idxs.append(i)
+            i += 2
+        if i < len_l:
+            if l[i] in ('-', '+'):
+                signal = (-1, 1)[l[i] == "+"]
+                used_idxs.append(i)
+                i += 1
+            else:
+                signal = 1
+            used_idxs.append(i)
+            res.dstoffset = (res.stdoffset + int(l[i]) * signal)
+
+    def _warn_legacy_tz_rule(self, tzstr):
+        # This was a made-up format that is not in normal use
+        warn(('Parsed time zone "%s"' % tzstr) +
+             'is in a non-standard dateutil-specific format, which ' +
+             'is now deprecated; support for parsing this format ' +
+             'will be removed in future versions. It is recommended ' +
+             'that you switch to a standard format like the GNU ' +
+             'TZ variable format.', tz.DeprecatedTzFormatWarning)
+
+    def _is_standard_tz_rule(self, l, i):
+        return (l.count(',') == 2 and l[i:].count('/') <= 2 and
+                not [y for x in l[i:] if x not in (',', '/', 'J', 'M',
+                                                   '.', '-', ':')
+                     for y in x if y not in "0123456789"])
+
+    def _parse_standard_rule_date(self, l, i, x, used_idxs):
+        if l[i] == 'J':
+            # non-leap year day (1 based)
+            used_idxs.append(i)
+            i += 1
+            x.jyday = int(l[i])
+        elif l[i] == 'M':
+            # month[-.]week[-.]weekday
+            used_idxs.append(i)
+            i += 1
+            x.month = int(l[i])
+            used_idxs.append(i)
+            i += 1
+            assert l[i] in ('-', '.')
+            used_idxs.append(i)
+            i += 1
+            x.week = int(l[i])
+            if x.week == 5:
+                x.week = -1
+            used_idxs.append(i)
+            i += 1
+            assert l[i] in ('-', '.')
+            used_idxs.append(i)
+            i += 1
+            x.weekday = (int(l[i]) - 1) % 7
+        else:
+            # year day (zero based)
+            x.yday = int(l[i]) + 1
+
+        used_idxs.append(i)
+        return i + 1
+
+    def _parse_standard_rule_time(self, l, i, x, used_idxs, len_l):
+        if i < len_l and l[i] == '/':
+            used_idxs.append(i)
+            i += 1
+            # start time
+            len_li = len(l[i])
+            if len_li == 4:
+                # -0300
+                x.time = (int(l[i][:2]) * 3600 + int(l[i][2:]) * 60)
+            elif i + 1 < len_l and l[i + 1] == ':':
+                # -03:00
+                x.time = int(l[i]) * 3600 + int(l[i + 2]) * 60
+                used_idxs.append(i)
+                i += 2
+                if i + 1 < len_l and l[i + 1] == ':':
+                    used_idxs.append(i)
+                    i += 2
+                    x.time += int(l[i])
+            elif len_li <= 2:
+                # -[0]3
+                x.time = (int(l[i][:2]) * 3600)
+            else:
+                return None
+            used_idxs.append(i)
+            i += 1
+        return i
+
+    def _parse_standard_tz_rule(self, res, l, i, len_l, used_idxs):
+        for x in (res.start, res.end):
+            i = self._parse_standard_rule_date(l, i, x, used_idxs)
+            i = self._parse_standard_rule_time(l, i, x, used_idxs, len_l)
+            if i is None:
+                return None
+
+            assert i == len_l or l[i] == ','
+            i += 1
+
+        assert i >= len_l
+        return i
+
     def parse(self, tzstr):
         res = self._result()
-        l = [x for x in re.split(r'([,:.]|[a-zA-Z]+|[0-9]+)',tzstr) if x]
+        l = [x for x in re.split(r'([,:.]|[a-zA-Z]+|[0-9]+)', tzstr) if x]
         used_idxs = list()
         try:
-
             len_l = len(l)
+            i = self._parse_tzname_and_offsets(res, l, used_idxs, len_l)
+            if i is None:
+                return None
 
-            i = 0
-            while i < len_l:
-                # BRST+3[BRDT[+2]]
-                j = i
-                while j < len_l and not [x for x in l[j]
-                                         if x in "0123456789:,-+"]:
-                    j += 1
-                if j != i:
-                    if not res.stdabbr:
-                        offattr = "stdoffset"
-                        res.stdabbr = "".join(l[i:j])
-                    else:
-                        offattr = "dstoffset"
-                        res.dstabbr = "".join(l[i:j])
-
-                    for ii in range(j):
-                        used_idxs.append(ii)
-                    i = j
-                    if (i < len_l and (l[i] in ('+', '-') or l[i][0] in
-                                       "0123456789")):
-                        if l[i] in ('+', '-'):
-                            # Yes, that's right.  See the TZ variable
-                            # documentation.
-                            signal = (1, -1)[l[i] == '+']
-                            used_idxs.append(i)
-                            i += 1
-                        else:
-                            signal = -1
-                        len_li = len(l[i])
-                        if len_li == 4:
-                            # -0300
-                            setattr(res, offattr, (int(l[i][:2]) * 3600 +
-                                                   int(l[i][2:]) * 60) * signal)
-                        elif i + 1 < len_l and l[i + 1] == ':':
-                            # -03:00
-                            setattr(res, offattr,
-                                    (int(l[i]) * 3600 +
-                                     int(l[i + 2]) * 60) * signal)
-                            used_idxs.append(i)
-                            i += 2
-                        elif len_li <= 2:
-                            # -[0]3
-                            setattr(res, offattr,
-                                    int(l[i][:2]) * 3600 * signal)
-                        else:
-                            return None
-                        used_idxs.append(i)
-                        i += 1
-                    if res.dstabbr:
-                        break
-                else:
-                    break
-
-
-            if i < len_l:
-                for j in range(i, len_l):
-                    if l[j] == ';':
-                        l[j] = ','
-
-                assert l[i] == ','
-
-                i += 1
+            i = self._prepare_tz_rules(l, i, len_l)
 
             if i >= len_l:
                 pass
-            elif (8 <= l.count(',') <= 9 and
-                  not [y for x in l[i:] if x != ','
-                       for y in x if y not in "0123456789+-"]):
-                # GMT0BST,3,0,30,3600,10,0,26,7200[,3600]
-                for x in (res.start, res.end):
-                    x.month = int(l[i])
-                    used_idxs.append(i)
-                    i += 2
-                    if l[i] == '-':
-                        value = int(l[i + 1]) * -1
-                        used_idxs.append(i)
-                        i += 1
-                    else:
-                        value = int(l[i])
-                    used_idxs.append(i)
-                    i += 2
-                    if value:
-                        x.week = value
-                        x.weekday = (int(l[i]) - 1) % 7
-                    else:
-                        x.day = int(l[i])
-                    used_idxs.append(i)
-                    i += 2
-                    x.time = int(l[i])
-                    used_idxs.append(i)
-                    i += 2
-                if i < len_l:
-                    if l[i] in ('-', '+'):
-                        signal = (-1, 1)[l[i] == "+"]
-                        used_idxs.append(i)
-                        i += 1
-                    else:
-                        signal = 1
-                    used_idxs.append(i)
-                    res.dstoffset = (res.stdoffset + int(l[i]) * signal)
-
-                # This was a made-up format that is not in normal use
-                warn(('Parsed time zone "%s"' % tzstr) +
-                     'is in a non-standard dateutil-specific format, which ' +
-                     'is now deprecated; support for parsing this format ' +
-                     'will be removed in future versions. It is recommended ' +
-                     'that you switch to a standard format like the GNU ' +
-                     'TZ variable format.', tz.DeprecatedTzFormatWarning)
-            elif (l.count(',') == 2 and l[i:].count('/') <= 2 and
-                  not [y for x in l[i:] if x not in (',', '/', 'J', 'M',
-                                                     '.', '-', ':')
-                       for y in x if y not in "0123456789"]):
-                for x in (res.start, res.end):
-                    if l[i] == 'J':
-                        # non-leap year day (1 based)
-                        used_idxs.append(i)
-                        i += 1
-                        x.jyday = int(l[i])
-                    elif l[i] == 'M':
-                        # month[-.]week[-.]weekday
-                        used_idxs.append(i)
-                        i += 1
-                        x.month = int(l[i])
-                        used_idxs.append(i)
-                        i += 1
-                        assert l[i] in ('-', '.')
-                        used_idxs.append(i)
-                        i += 1
-                        x.week = int(l[i])
-                        if x.week == 5:
-                            x.week = -1
-                        used_idxs.append(i)
-                        i += 1
-                        assert l[i] in ('-', '.')
-                        used_idxs.append(i)
-                        i += 1
-                        x.weekday = (int(l[i]) - 1) % 7
-                    else:
-                        # year day (zero based)
-                        x.yday = int(l[i]) + 1
-
-                    used_idxs.append(i)
-                    i += 1
-
-                    if i < len_l and l[i] == '/':
-                        used_idxs.append(i)
-                        i += 1
-                        # start time
-                        len_li = len(l[i])
-                        if len_li == 4:
-                            # -0300
-                            x.time = (int(l[i][:2]) * 3600 +
-                                      int(l[i][2:]) * 60)
-                        elif i + 1 < len_l and l[i + 1] == ':':
-                            # -03:00
-                            x.time = int(l[i]) * 3600 + int(l[i + 2]) * 60
-                            used_idxs.append(i)
-                            i += 2
-                            if i + 1 < len_l and l[i + 1] == ':':
-                                used_idxs.append(i)
-                                i += 2
-                                x.time += int(l[i])
-                        elif len_li <= 2:
-                            # -[0]3
-                            x.time = (int(l[i][:2]) * 3600)
-                        else:
-                            return None
-                        used_idxs.append(i)
-                        i += 1
-
-                    assert i == len_l or l[i] == ','
-
-                    i += 1
-
-                assert i >= len_l
+            elif self._is_legacy_tz_rule(l, i):
+                self._parse_legacy_tz_rule(res, l, i, len_l, used_idxs)
+                self._warn_legacy_tz_rule(tzstr)
+            elif self._is_standard_tz_rule(l, i):
+                i = self._parse_standard_tz_rule(res, l, i, len_l,
+                                                 used_idxs)
+                if i is None:
+                    return None
 
         except (IndexError, ValueError, AssertionError):
             return None
@@ -1584,6 +1822,9 @@ DEFAULTTZPARSER = _tzparser()
 
 def _parsetz(tzstr):
     return DEFAULTTZPARSER.parse(tzstr)
+
+
+_register_provider("tzstr_parser", _parsetz)
 
 
 class ParserError(ValueError):

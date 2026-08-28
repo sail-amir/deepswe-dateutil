@@ -3,6 +3,21 @@ Common code used in multiple modules.
 """
 
 
+def _unfold_rfc_lines(lines):
+    i = 0
+    while i < len(lines):
+        line = lines[i].rstrip()
+        if not line:
+            del lines[i]
+        elif i > 0 and line[0] == " ":
+            lines[i-1] += line[1:]
+            del lines[i]
+        else:
+            i += 1
+
+    return lines
+
+
 class weekday(object):
     __slots__ = ["weekday", "n"]
 

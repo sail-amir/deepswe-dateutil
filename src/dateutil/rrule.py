@@ -270,6 +270,12 @@ class rrulebase(object):
 
                 yield d
 
+    def _is_after_boundary(self, value, boundary, inc):
+        return value >= boundary if inc else value > boundary
+
+    def _is_before_boundary(self, value, boundary, inc):
+        return value <= boundary if inc else value < boundary
+
     def between(self, after, before, inc=False, count=1):
         """ Returns all the occurrences of the rrule between after and before.
         The inc keyword defines what happens if after and/or before are
@@ -281,26 +287,15 @@ class rrulebase(object):
             gen = self
         started = False
         l = []
-        if inc:
-            for i in gen:
-                if i > before:
-                    break
-                elif not started:
-                    if i >= after:
-                        started = True
-                        l.append(i)
-                else:
+        for i in gen:
+            if not self._is_before_boundary(i, before, inc):
+                break
+            elif not started:
+                if self._is_after_boundary(i, after, inc):
+                    started = True
                     l.append(i)
-        else:
-            for i in gen:
-                if i >= before:
-                    break
-                elif not started:
-                    if i > after:
-                        started = True
-                        l.append(i)
-                else:
-                    l.append(i)
+            else:
+                l.append(i)
         return l
 
 
@@ -736,6 +731,42 @@ class rrule(rrulebase):
         self._set_bysecond(bysecond, freq, dtstart)
         self._set_timeset()
 
+    def _format_original_rule(self):
+        if self._original_rule.get('byweekday') is not None:
+            # The str() method on weekday objects doesn't generate
+            # RFC5545-compliant strings, so we should modify that.
+            original_rule = dict(self._original_rule)
+            wday_strings = []
+            for wday in original_rule['byweekday']:
+                if wday.n:
+                    wday_strings.append('{n:+d}{wday}'.format(
+                        n=wday.n,
+                        wday=repr(wday)[0:2]))
+                else:
+                    wday_strings.append(repr(wday))
+
+            original_rule['byweekday'] = wday_strings
+        else:
+            original_rule = self._original_rule
+        return original_rule
+
+    def _append_original_rule_parts(self, parts, original_rule):
+        partfmt = '{name}={vals}'
+        for name, key in [('BYSETPOS', 'bysetpos'),
+                          ('BYMONTH', 'bymonth'),
+                          ('BYMONTHDAY', 'bymonthday'),
+                          ('BYYEARDAY', 'byyearday'),
+                          ('BYWEEKNO', 'byweekno'),
+                          ('BYDAY', 'byweekday'),
+                          ('BYHOUR', 'byhour'),
+                          ('BYMINUTE', 'byminute'),
+                          ('BYSECOND', 'bysecond'),
+                          ('BYEASTER', 'byeaster')]:
+            value = original_rule.get(key)
+            if value:
+                parts.append(partfmt.format(name=name, vals=(','.join(str(v)
+                                                             for v in value))))
+
     def __str__(self):
         """
         Output a string that would generate this RRULE if passed to rrulestr.
@@ -762,39 +793,8 @@ class rrule(rrulebase):
         if self._until:
             parts.append(self._until.strftime('UNTIL=%Y%m%dT%H%M%S'))
 
-        if self._original_rule.get('byweekday') is not None:
-            # The str() method on weekday objects doesn't generate
-            # RFC5545-compliant strings, so we should modify that.
-            original_rule = dict(self._original_rule)
-            wday_strings = []
-            for wday in original_rule['byweekday']:
-                if wday.n:
-                    wday_strings.append('{n:+d}{wday}'.format(
-                        n=wday.n,
-                        wday=repr(wday)[0:2]))
-                else:
-                    wday_strings.append(repr(wday))
-
-            original_rule['byweekday'] = wday_strings
-        else:
-            original_rule = self._original_rule
-
-        partfmt = '{name}={vals}'
-        for name, key in [('BYSETPOS', 'bysetpos'),
-                          ('BYMONTH', 'bymonth'),
-                          ('BYMONTHDAY', 'bymonthday'),
-                          ('BYYEARDAY', 'byyearday'),
-                          ('BYWEEKNO', 'byweekno'),
-                          ('BYDAY', 'byweekday'),
-                          ('BYHOUR', 'byhour'),
-                          ('BYMINUTE', 'byminute'),
-                          ('BYSECOND', 'bysecond'),
-                          ('BYEASTER', 'byeaster')]:
-            value = original_rule.get(key)
-            if value:
-                parts.append(partfmt.format(name=name, vals=(','.join(str(v)
-                                                             for v in value))))
-
+        original_rule = self._format_original_rule()
+        self._append_original_rule_parts(parts, original_rule)
         output.append('RRULE:' + ';'.join(parts))
         return '\n'.join(output)
 
@@ -1088,6 +1088,32 @@ class rrule(rrulebase):
         return (year, month, day, hour, minute, second, weekday,
                 timeset, fixday, stop)
 
+    def _iter_candidates(self, dayset, start, end, timeset, bysetpos, ii):
+        if bysetpos and timeset:
+            for res in self._build_poslist(
+                    dayset, start, end, timeset, bysetpos, ii):
+                yield res
+        else:
+            for i in dayset[start:end]:
+                if i is not None:
+                    date = datetime.date.fromordinal(ii.yearordinal + i)
+                    for time in timeset:
+                        yield datetime.datetime.combine(date, time)
+
+    def _process_iter_result(self, res, until, count, total):
+        if until and res > until:
+            self._len = total
+            return True, False, count, total
+        elif res >= self._dtstart:
+            if count is not None:
+                count -= 1
+                if count < 0:
+                    self._len = total
+                    return True, False, count, total
+            total += 1
+            return False, True, count, total
+        return False, False, count, total
+
     def _iter(self):
         year, month, day, hour, minute, second, weekday, yearday, _ = \
             self._dtstart.timetuple()
@@ -1137,40 +1163,15 @@ class rrule(rrulebase):
             )
 
             # Output results
-            if bysetpos and timeset:
-                poslist = self._build_poslist(
-                    dayset, start, end, timeset, bysetpos, ii
+            for res in self._iter_candidates(
+                    dayset, start, end, timeset, bysetpos, ii):
+                stop, emit, count, total = self._process_iter_result(
+                    res, until, count, total
                 )
-                for res in poslist:
-                    if until and res > until:
-                        self._len = total
-                        return
-                    elif res >= self._dtstart:
-                        if count is not None:
-                            count -= 1
-                            if count < 0:
-                                self._len = total
-                                return
-                        total += 1
-                        yield res
-            else:
-                for i in dayset[start:end]:
-                    if i is not None:
-                        date = datetime.date.fromordinal(ii.yearordinal + i)
-                        for time in timeset:
-                            res = datetime.datetime.combine(date, time)
-                            if until and res > until:
-                                self._len = total
-                                return
-                            elif res >= self._dtstart:
-                                if count is not None:
-                                    count -= 1
-                                    if count < 0:
-                                        self._len = total
-                                        return
-
-                                total += 1
-                                yield res
+                if stop:
+                    return
+                if emit:
+                    yield res
 
             # Handle frequency and interval
             (year, month, day, hour, minute, second, weekday,
@@ -1575,36 +1576,41 @@ class rruleset(rrulebase):
             even if some inclusive rrule or rdate matches them. """
         self._exdate.append(exdate)
 
+    def _build_heap(self, dates, rules):
+        items = []
+        dates.sort()
+        self._genitem(items, iter(dates))
+        for gen in [iter(x) for x in rules]:
+            self._genitem(items, gen)
+        heapq.heapify(items)
+        return items
+
+    def _advance_exclusions(self, exlist, ritem):
+        while exlist and exlist[0] < ritem:
+            exitem = exlist[0]
+            advance_iterator(exitem)
+            if exlist and exlist[0] is exitem:
+                heapq.heapreplace(exlist, exitem)
+
+    def _advance_heap_item(self, items, item):
+        advance_iterator(item)
+        if items and items[0] is item:
+            heapq.heapreplace(items, item)
+
     def _iter(self):
-        rlist = []
-        self._rdate.sort()
-        self._genitem(rlist, iter(self._rdate))
-        for gen in [iter(x) for x in self._rrule]:
-            self._genitem(rlist, gen)
-        exlist = []
-        self._exdate.sort()
-        self._genitem(exlist, iter(self._exdate))
-        for gen in [iter(x) for x in self._exrule]:
-            self._genitem(exlist, gen)
+        rlist = self._build_heap(self._rdate, self._rrule)
+        exlist = self._build_heap(self._exdate, self._exrule)
         lastdt = None
         total = 0
-        heapq.heapify(rlist)
-        heapq.heapify(exlist)
         while rlist:
             ritem = rlist[0]
             if not lastdt or lastdt != ritem.dt:
-                while exlist and exlist[0] < ritem:
-                    exitem = exlist[0]
-                    advance_iterator(exitem)
-                    if exlist and exlist[0] is exitem:
-                        heapq.heapreplace(exlist, exitem)
+                self._advance_exclusions(exlist, ritem)
                 if not exlist or ritem != exlist[0]:
                     total += 1
                     yield ritem.dt
                 lastdt = ritem.dt
-            advance_iterator(ritem)
-            if rlist and rlist[0] is ritem:
-                heapq.heapreplace(rlist, ritem)
+            self._advance_heap_item(rlist, ritem)
         self._len = total
 
 
@@ -1701,31 +1707,33 @@ class _rrulestr(object):
     def _handle_WKST(self, rrkwargs, name, value, **kwargs):
         rrkwargs["wkst"] = self._weekday_map[value]
 
+    def _parse_byweekday(self, wday):
+        if '(' in wday:
+            # If it's of the form TH(+1), etc.
+            splt = wday.split('(')
+            w = splt[0]
+            n = int(splt[1][:-1])
+        elif len(wday):
+            # If it's of the form +1MO
+            for i in range(len(wday)):
+                if wday[i] not in '+-0123456789':
+                    break
+            n = wday[:i] or None
+            w = wday[i:]
+            if n:
+                n = int(n)
+        else:
+            raise ValueError("Invalid (empty) BYDAY specification.")
+
+        return weekdays[self._weekday_map[w]](n)
+
     def _handle_BYWEEKDAY(self, rrkwargs, name, value, **kwargs):
         """
         Two ways to specify this: +1MO or MO(+1)
         """
-        l = []
-        for wday in value.split(','):
-            if '(' in wday:
-                # If it's of the form TH(+1), etc.
-                splt = wday.split('(')
-                w = splt[0]
-                n = int(splt[1][:-1])
-            elif len(wday):
-                # If it's of the form +1MO
-                for i in range(len(wday)):
-                    if wday[i] not in '+-0123456789':
-                        break
-                n = wday[:i] or None
-                w = wday[i:]
-                if n:
-                    n = int(n)
-            else:
-                raise ValueError("Invalid (empty) BYDAY specification.")
-
-            l.append(weekdays[self._weekday_map[w]](n))
-        rrkwargs["byweekday"] = l
+        rrkwargs["byweekday"] = [
+            self._parse_byweekday(wday) for wday in value.split(',')
+        ]
 
     _handle_BYDAY = _handle_BYWEEKDAY
 
@@ -1755,57 +1763,70 @@ class _rrulestr(object):
                 raise ValueError("invalid '%s': %s" % (name, value))
         return rrule(dtstart=dtstart, cache=cache, **rrkwargs)
 
+    def _get_tzlookup(self, tzids):
+        if tzids is None:
+            from . import tz
+            return tz.gettz
+        elif callable(tzids):
+            return tzids
+        else:
+            tzlookup = getattr(tzids, 'get', None)
+            if tzlookup is None:
+                msg = ('tzids must be a callable, mapping, or None, '
+                       'not %s' % tzids)
+                raise ValueError(msg)
+            return tzlookup
+
+    def _resolve_tzid_parameter(self, parm, rule_tzids, tzids):
+        try:
+            tzkey = rule_tzids[parm.split('TZID=')[-1]]
+        except KeyError:
+            return False, None
+        return True, self._get_tzlookup(tzids)(tzkey)
+
+    def _validate_value_parameter(self, parm, value_found):
+        # RFC 5445 3.8.2.4: The VALUE parameter is optional, but may be found
+        # only once.
+        if parm not in {"VALUE=DATE-TIME", "VALUE=DATE"}:
+            raise ValueError("unsupported parm: " + parm)
+        elif value_found:
+            msg = ("Duplicate value parameter found in: " + parm)
+            raise ValueError(msg)
+
+    def _parse_date_values(self, date_value, tzid, ignoretz, tzinfos):
+        datevals = []
+        for datestr in date_value.split(','):
+            date = parser.parse(datestr, ignoretz=ignoretz, tzinfos=tzinfos)
+            if tzid is not None:
+                if date.tzinfo is None:
+                    date = date.replace(tzinfo=tzid)
+                else:
+                    raise ValueError('DTSTART/EXDATE specifies multiple timezone')
+            datevals.append(date)
+        return datevals
+
     def _parse_date_value(self, date_value, parms, rule_tzids,
                           ignoretz, tzids, tzinfos):
         global parser
         if not parser:
             from dateutil import parser
 
-        datevals = []
         value_found = False
         TZID = None
 
         for parm in parms:
             if parm.startswith("TZID="):
-                try:
-                    tzkey = rule_tzids[parm.split('TZID=')[-1]]
-                except KeyError:
-                    continue
-                if tzids is None:
-                    from . import tz
-                    tzlookup = tz.gettz
-                elif callable(tzids):
-                    tzlookup = tzids
-                else:
-                    tzlookup = getattr(tzids, 'get', None)
-                    if tzlookup is None:
-                        msg = ('tzids must be a callable, mapping, or None, '
-                               'not %s' % tzids)
-                        raise ValueError(msg)
-
-                TZID = tzlookup(tzkey)
+                found, resolved_tzid = self._resolve_tzid_parameter(
+                    parm, rule_tzids, tzids
+                )
+                if found:
+                    TZID = resolved_tzid
                 continue
 
-            # RFC 5445 3.8.2.4: The VALUE parameter is optional, but may be found
-            # only once.
-            if parm not in {"VALUE=DATE-TIME", "VALUE=DATE"}:
-                raise ValueError("unsupported parm: " + parm)
-            else:
-                if value_found:
-                    msg = ("Duplicate value parameter found in: " + parm)
-                    raise ValueError(msg)
-                value_found = True
+            self._validate_value_parameter(parm, value_found)
+            value_found = True
 
-        for datestr in date_value.split(','):
-            date = parser.parse(datestr, ignoretz=ignoretz, tzinfos=tzinfos)
-            if TZID is not None:
-                if date.tzinfo is None:
-                    date = date.replace(tzinfo=TZID)
-                else:
-                    raise ValueError('DTSTART/EXDATE specifies multiple timezone')
-            datevals.append(date)
-
-        return datevals
+        return self._parse_date_values(date_value, TZID, ignoretz, tzinfos)
 
     def _parse_rfc_lines(self, s, unfold):
         if unfold:

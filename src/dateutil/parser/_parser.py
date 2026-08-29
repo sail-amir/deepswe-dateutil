@@ -482,7 +482,7 @@ class _ymd(list):
             year = self[self.ystridx]
             return 1 <= value <= monthrange(year, month)[1]
 
-    def append(self, val, label=None):
+    def _resolve_label(self, val, label):
         if hasattr(val, '__len__'):
             if val.isdigit() and len(val) > 2:
                 self.century_specified = True
@@ -495,8 +495,9 @@ class _ymd(list):
                 raise ValueError(label)
             label = 'Y'
 
-        super(self.__class__, self).append(int(val))
+        return label
 
+    def _set_index(self, label):
         if label == 'M':
             if self.has_month:
                 raise ValueError('Month is already set')
@@ -509,6 +510,11 @@ class _ymd(list):
             if self.has_year:
                 raise ValueError('Year is already set')
             self.ystridx = len(self) - 1
+
+    def append(self, val, label=None):
+        label = self._resolve_label(val, label)
+        super(self.__class__, self).append(int(val))
+        self._set_index(label)
 
     def _resolve_from_stridxs(self, strids):
         """
@@ -1107,32 +1113,36 @@ class parser(object):
 
         return True, idx
 
+    def _append_ymd_second_token(self, token, info, ymd):
+        if token.isdigit():
+            # 01-01[-01]
+            ymd.append(token)
+        else:
+            # 01-Jan[-01]
+            value = info.month(token)
+            if value is not None:
+                ymd.append(value, 'M')
+            else:
+                raise ValueError()
+
+    def _append_ymd_third_token(self, token, info, ymd):
+        value = info.month(token)
+        if value is not None:
+            ymd.append(value, 'M')
+        else:
+            ymd.append(token)
+
     def _parse_separated_ymd(self, tokens, idx, info, ymd, value_repr,
                              len_l):
         sep = tokens[idx + 1]
         ymd.append(value_repr)
 
         if idx + 2 < len_l and not info.jump(tokens[idx + 2]):
-            if tokens[idx + 2].isdigit():
-                # 01-01[-01]
-                ymd.append(tokens[idx + 2])
-            else:
-                # 01-Jan[-01]
-                value = info.month(tokens[idx + 2])
-
-                if value is not None:
-                    ymd.append(value, 'M')
-                else:
-                    raise ValueError()
+            self._append_ymd_second_token(tokens[idx + 2], info, ymd)
 
             if idx + 3 < len_l and tokens[idx + 3] == sep:
                 # We have three members
-                value = info.month(tokens[idx + 4])
-
-                if value is not None:
-                    ymd.append(value, 'M')
-                else:
-                    ymd.append(tokens[idx + 4])
+                self._append_ymd_third_token(tokens[idx + 4], info, ymd)
                 idx += 2
 
             idx += 1

@@ -1166,8 +1166,7 @@ class tzstr(tzrange):
 
         self.hasdst = bool(self._start_delta)
 
-    def _delta(self, x, isend=0):
-        from dateutil import relativedelta
+    def _delta_date_kwargs(self, x, relativedelta):
         kwargs = {}
         if x.month is not None:
             kwargs["month"] = x.month
@@ -1183,6 +1182,9 @@ class tzstr(tzrange):
             kwargs["yearday"] = x.yday
         elif x.jyday is not None:
             kwargs["nlyearday"] = x.jyday
+        return kwargs
+
+    def _set_default_delta_date(self, kwargs, isend, relativedelta):
         if not kwargs:
             # Default is to start on first sunday of april, and end
             # on last sunday of october.
@@ -1194,6 +1196,11 @@ class tzstr(tzrange):
                 kwargs["month"] = 10
                 kwargs["day"] = 31
                 kwargs["weekday"] = relativedelta.SU(-1)
+
+    def _delta(self, x, isend=0):
+        from dateutil import relativedelta
+        kwargs = self._delta_date_kwargs(x, relativedelta)
+        self._set_default_delta_date(kwargs, isend, relativedelta)
         if x.time is not None:
             kwargs["seconds"] = x.time
         else:
@@ -1223,8 +1230,11 @@ class _tzicalvtzcomp(object):
 
 
 class _tzicalvtz(_tzinfo):
-    def __init__(self, tzid, comps=[]):
+    def __init__(self, tzid, comps=None):
         super(_tzicalvtz, self).__init__()
+
+        if comps is None:
+            comps = []
 
         self._tzid = tzid
         self._comps = comps
@@ -1439,6 +1449,107 @@ class tzical(object):
 
         return tzid
 
+    def _start_rfc_component(self, value):
+        if value not in ("STANDARD", "DAYLIGHT"):
+            raise ValueError("unknown component: "+value)
+        return value, False, None, None, [], None
+
+    def _end_rfc_component(self, value, tzid, comps, comptype,
+                           founddtstart, tzoffsetfrom, tzoffsetto,
+                           rrulelines, tzname):
+        if value == "VTIMEZONE":
+            self._vtz[tzid] = self._build_tzicalvtz(
+                tzid, comps, comptype
+            )
+            return False, comptype
+        elif value == comptype:
+            comp = self._build_tzicalvtzcomp(
+                comptype, founddtstart, tzoffsetfrom,
+                tzoffsetto, tzname, rrulelines
+            )
+            comps.append(comp)
+            return True, None
+        else:
+            raise ValueError("invalid component end: "+value)
+
+    def _append_rfc_dtstart(self, parms, line, rrulelines):
+        # DTSTART in VTIMEZONE takes a subset of valid RRULE
+        # values under RFC 5545.
+        for parm in parms:
+            if parm != 'VALUE=DATE-TIME':
+                msg = ('Unsupported DTSTART param in ' +
+                       'VTIMEZONE: ' + parm)
+                raise ValueError(msg)
+        rrulelines.append(line)
+
+    def _parse_rfc_offset_property(self, name, value, parms):
+        if parms:
+            if name == "TZOFFSETFROM":
+                raise ValueError(
+                    "unsupported %s parm: %s " % (name, parms[0]))
+            else:
+                raise ValueError(
+                    "unsupported TZOFFSETTO parm: "+parms[0])
+        return self._parse_offset(value)
+
+    def _parse_rfc_tzname_property(self, value, parms):
+        if parms:
+            raise ValueError(
+                "unsupported TZNAME parm: "+parms[0])
+        return value
+
+    def _parse_rfc_component_property(self, name, value, parms, line,
+                                      founddtstart, tzoffsetfrom,
+                                      tzoffsetto, rrulelines, tzname):
+        if name == "DTSTART":
+            self._append_rfc_dtstart(parms, line, rrulelines)
+            founddtstart = True
+        elif name in ("RRULE", "RDATE", "EXRULE", "EXDATE"):
+            rrulelines.append(line)
+        elif name == "TZOFFSETFROM":
+            tzoffsetfrom = self._parse_rfc_offset_property(
+                name, value, parms
+            )
+        elif name == "TZOFFSETTO":
+            tzoffsetto = self._parse_rfc_offset_property(
+                name, value, parms
+            )
+        elif name == "TZNAME":
+            tzname = self._parse_rfc_tzname_property(value, parms)
+        elif name == "COMMENT":
+            pass
+        else:
+            raise ValueError("unsupported property: "+name)
+
+        return (founddtstart, tzoffsetfrom, tzoffsetto,
+                rrulelines, tzname)
+
+    def _parse_rfc_vtimezone_line(
+            self, name, value, parms, line, tzid, comps, comptype,
+            founddtstart, tzoffsetfrom, tzoffsetto, rrulelines, tzname):
+        invtz = True
+        if name == "BEGIN":
+            (comptype, founddtstart, tzoffsetfrom, tzoffsetto,
+             rrulelines, tzname) = self._start_rfc_component(value)
+        elif name == "END":
+            invtz, comptype = self._end_rfc_component(
+                value, tzid, comps, comptype, founddtstart,
+                tzoffsetfrom, tzoffsetto, rrulelines, tzname
+            )
+        elif comptype:
+            (founddtstart, tzoffsetfrom, tzoffsetto,
+             rrulelines, tzname) = self._parse_rfc_component_property(
+                name, value, parms, line, founddtstart,
+                tzoffsetfrom, tzoffsetto, rrulelines, tzname
+            )
+        else:
+            tzid = self._parse_rfc_vtimezone_property(
+                name, value, parms, tzid
+            )
+
+        return (tzid, comps, invtz, comptype, founddtstart,
+                tzoffsetfrom, tzoffsetto, rrulelines, tzname)
+
     def _parse_rfc(self, s):
         lines = self._unfold_rfc_lines(s)
 
@@ -1446,76 +1557,23 @@ class tzical(object):
         comps = []
         invtz = False
         comptype = None
+        founddtstart = False
+        tzoffsetfrom = None
+        tzoffsetto = None
+        rrulelines = []
+        tzname = None
         for line in lines:
             if not line:
                 continue
             name, value, parms = self._parse_rfc_content_line(line)
             if invtz:
-                if name == "BEGIN":
-                    if value in ("STANDARD", "DAYLIGHT"):
-                        # Process component
-                        pass
-                    else:
-                        raise ValueError("unknown component: "+value)
-                    comptype = value
-                    founddtstart = False
-                    tzoffsetfrom = None
-                    tzoffsetto = None
-                    rrulelines = []
-                    tzname = None
-                elif name == "END":
-                    if value == "VTIMEZONE":
-                        # Process vtimezone
-                        self._vtz[tzid] = self._build_tzicalvtz(
-                            tzid, comps, comptype
-                        )
-                        invtz = False
-                    elif value == comptype:
-                        # Process component
-                        comp = self._build_tzicalvtzcomp(
-                            comptype, founddtstart, tzoffsetfrom,
-                            tzoffsetto, tzname, rrulelines
-                        )
-                        comps.append(comp)
-                        comptype = None
-                    else:
-                        raise ValueError("invalid component end: "+value)
-                elif comptype:
-                    if name == "DTSTART":
-                        # DTSTART in VTIMEZONE takes a subset of valid RRULE
-                        # values under RFC 5545.
-                        for parm in parms:
-                            if parm != 'VALUE=DATE-TIME':
-                                msg = ('Unsupported DTSTART param in ' +
-                                       'VTIMEZONE: ' + parm)
-                                raise ValueError(msg)
-                        rrulelines.append(line)
-                        founddtstart = True
-                    elif name in ("RRULE", "RDATE", "EXRULE", "EXDATE"):
-                        rrulelines.append(line)
-                    elif name == "TZOFFSETFROM":
-                        if parms:
-                            raise ValueError(
-                                "unsupported %s parm: %s " % (name, parms[0]))
-                        tzoffsetfrom = self._parse_offset(value)
-                    elif name == "TZOFFSETTO":
-                        if parms:
-                            raise ValueError(
-                                "unsupported TZOFFSETTO parm: "+parms[0])
-                        tzoffsetto = self._parse_offset(value)
-                    elif name == "TZNAME":
-                        if parms:
-                            raise ValueError(
-                                "unsupported TZNAME parm: "+parms[0])
-                        tzname = value
-                    elif name == "COMMENT":
-                        pass
-                    else:
-                        raise ValueError("unsupported property: "+name)
-                else:
-                    tzid = self._parse_rfc_vtimezone_property(
-                        name, value, parms, tzid
-                    )
+                (tzid, comps, invtz, comptype, founddtstart,
+                 tzoffsetfrom, tzoffsetto, rrulelines,
+                 tzname) = self._parse_rfc_vtimezone_line(
+                    name, value, parms, line, tzid, comps, comptype,
+                    founddtstart, tzoffsetfrom, tzoffsetto,
+                    rrulelines, tzname
+                )
             elif name == "BEGIN" and value == "VTIMEZONE":
                 tzid = None
                 comps = []
@@ -1536,213 +1594,244 @@ else:
     TZPATHS = []
 
 
+def _resolve_local_tzfile(filepath):
+    if os.path.isabs(filepath):
+        return filepath if os.path.isfile(filepath) else None
+
+    for path in TZPATHS:
+        candidate = os.path.join(path, filepath)
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def _load_local_tzfile(filepath):
+    try:
+        return True, tzfile(filepath)
+    except (IOError, OSError, ValueError):
+        return False, None
+
+
+def _get_local_tz():
+    for filepath in TZFILES:
+        filepath = _resolve_local_tzfile(filepath)
+        if filepath is not None:
+            loaded, tz = _load_local_tzfile(filepath)
+            if loaded:
+                return tz
+    return tzlocal()
+
+
+def _get_tzfile_from_paths(name):
+    for path in TZPATHS:
+        filepath = os.path.join(path, name)
+        if not os.path.isfile(filepath):
+            filepath = filepath.replace(' ', '_')
+            if not os.path.isfile(filepath):
+                continue
+        try:
+            return tzfile(filepath)
+        except (IOError, OSError, ValueError):
+            pass
+    return None
+
+
+def _get_tzwin(name):
+    if tzwin is not None:
+        try:
+            return tzwin(name)
+        except (WindowsError, UnicodeEncodeError):
+            # UnicodeEncodeError is for Python 2.7 compat
+            pass
+    return None
+
+
+def _get_tzstr_or_local_name(name):
+    for c in name:
+        # name is not a tzstr unless it has at least one offset. For short
+        # values of "name", an explicit for loop seems to be the fastest way
+        # to determine if a string contains a digit.
+        if c in "0123456789":
+            try:
+                return tzstr(name)
+            except ValueError:
+                return None
+
+    if name in ("GMT", "UTC"):
+        return UTC
+    elif name in time.tzname:
+        return tzlocal()
+    return None
+
+
+def _get_fallback_tz(name):
+    tz = _get_tzwin(name)
+    if not tz:
+        from dateutil.zoneinfo import get_zonefile_instance
+        tz = get_zonefile_instance().get(name)
+    if not tz:
+        tz = _get_tzstr_or_local_name(name)
+    return tz
+
+
+def _get_named_tz(name):
+    if os.path.isabs(name):
+        if os.path.isfile(name):
+            return tzfile(name)
+        return None
+
+    tz = _get_tzfile_from_paths(name)
+    if tz is None:
+        tz = _get_fallback_tz(name)
+    return tz
+
+
+class _GettzFunc(object):
+    """
+    Retrieve a time zone object from a string representation
+
+    This function is intended to retrieve the :py:class:`tzinfo` subclass
+    that best represents the time zone that would be used if a POSIX
+    `TZ variable`_ were set to the same value.
+
+    If no argument or an empty string is passed to ``gettz``, local time
+    is returned:
+
+    .. code-block:: python3
+
+        >>> gettz()
+        tzfile('/etc/localtime')
+
+    This function is also the preferred way to map IANA tz database keys
+    to :class:`tzfile` objects:
+
+    .. code-block:: python3
+
+        >>> gettz('Pacific/Kiritimati')
+        tzfile('/usr/share/zoneinfo/Pacific/Kiritimati')
+
+    On Windows, the standard is extended to include the Windows-specific
+    zone names provided by the operating system:
+
+    .. code-block:: python3
+
+        >>> gettz('Egypt Standard Time')
+        tzwin('Egypt Standard Time')
+
+    Passing a GNU ``TZ`` style string time zone specification returns a
+    :class:`tzstr` object:
+
+    .. code-block:: python3
+
+        >>> gettz('AEST-10AEDT-11,M10.1.0/2,M4.1.0/3')
+        tzstr('AEST-10AEDT-11,M10.1.0/2,M4.1.0/3')
+
+    :param name:
+        A time zone name (IANA, or, on Windows, Windows keys), location of
+        a ``tzfile(5)`` zoneinfo file or ``TZ`` variable style time zone
+        specifier. An empty string, no argument or ``None`` is interpreted
+        as local time.
+
+    :return:
+        Returns an instance of one of ``dateutil``'s :py:class:`tzinfo`
+        subclasses.
+
+    .. versionchanged:: 2.7.0
+
+        After version 2.7.0, any two calls to ``gettz`` using the same
+        input strings will return the same object:
+
+        .. code-block:: python3
+
+            >>> tz.gettz('America/Chicago') is tz.gettz('America/Chicago')
+            True
+
+        In addition to improving performance, this ensures that
+        `"same zone" semantics`_ are used for datetimes in the same zone.
+
+
+    .. _`TZ variable`:
+        https://www.gnu.org/software/libc/manual/html_node/TZ-Variable.html
+
+    .. _`"same zone" semantics`:
+        https://blog.ganssle.io/articles/2018/02/aware-datetime-arithmetic.html
+    """
+    def __init__(self, tzlocal_classes):
+        self._tzlocal_classes = tzlocal_classes
+
+        self.__instances = weakref.WeakValueDictionary()
+        self.__strong_cache_size = 8
+        self.__strong_cache = OrderedDict()
+        self._cache_lock = _thread.allocate_lock()
+
+    def __call__(self, name=None):
+        with self._cache_lock:
+            rv = self.__instances.get(name, None)
+
+            if rv is None:
+                rv = self.nocache(name=name)
+                if not (name is None
+                        or isinstance(rv, self._tzlocal_classes)
+                        or rv is None):
+                    # tzlocal is slightly more complicated than the other
+                    # time zone providers because it depends on environment
+                    # at construction time, so don't cache that.
+                    #
+                    # We also cannot store weak references to None, so we
+                    # will also not store that.
+                    self.__instances[name] = rv
+                else:
+                    # No need for strong caching, return immediately
+                    return rv
+
+            self.__strong_cache[name] = self.__strong_cache.pop(name, rv)
+
+            if len(self.__strong_cache) > self.__strong_cache_size:
+                self.__strong_cache.popitem(last=False)
+
+        return rv
+
+    def set_cache_size(self, size):
+        with self._cache_lock:
+            self.__strong_cache_size = size
+            while len(self.__strong_cache) > size:
+                self.__strong_cache.popitem(last=False)
+
+    def cache_clear(self):
+        with self._cache_lock:
+            self.__instances = weakref.WeakValueDictionary()
+            self.__strong_cache.clear()
+
+    @staticmethod
+    def nocache(name=None):
+        """A non-cached version of gettz"""
+        if not name:
+            try:
+                name = os.environ["TZ"]
+            except KeyError:
+                pass
+        if name is None or name in ("", ":"):
+            return _get_local_tz()
+        else:
+            try:
+                if name.startswith(":"):
+                    name = name[1:]
+            except TypeError as e:
+                if isinstance(name, bytes):
+                    new_msg = "gettz argument should be str, not bytes"
+                    six.raise_from(TypeError(new_msg), e)
+                else:
+                    raise
+            return _get_named_tz(name)
+
+
+
 def __get_gettz():
     tzlocal_classes = (tzlocal,)
     if tzwinlocal is not None:
         tzlocal_classes += (tzwinlocal,)
 
-    class GettzFunc(object):
-        """
-        Retrieve a time zone object from a string representation
-
-        This function is intended to retrieve the :py:class:`tzinfo` subclass
-        that best represents the time zone that would be used if a POSIX
-        `TZ variable`_ were set to the same value.
-
-        If no argument or an empty string is passed to ``gettz``, local time
-        is returned:
-
-        .. code-block:: python3
-
-            >>> gettz()
-            tzfile('/etc/localtime')
-
-        This function is also the preferred way to map IANA tz database keys
-        to :class:`tzfile` objects:
-
-        .. code-block:: python3
-
-            >>> gettz('Pacific/Kiritimati')
-            tzfile('/usr/share/zoneinfo/Pacific/Kiritimati')
-
-        On Windows, the standard is extended to include the Windows-specific
-        zone names provided by the operating system:
-
-        .. code-block:: python3
-
-            >>> gettz('Egypt Standard Time')
-            tzwin('Egypt Standard Time')
-
-        Passing a GNU ``TZ`` style string time zone specification returns a
-        :class:`tzstr` object:
-
-        .. code-block:: python3
-
-            >>> gettz('AEST-10AEDT-11,M10.1.0/2,M4.1.0/3')
-            tzstr('AEST-10AEDT-11,M10.1.0/2,M4.1.0/3')
-
-        :param name:
-            A time zone name (IANA, or, on Windows, Windows keys), location of
-            a ``tzfile(5)`` zoneinfo file or ``TZ`` variable style time zone
-            specifier. An empty string, no argument or ``None`` is interpreted
-            as local time.
-
-        :return:
-            Returns an instance of one of ``dateutil``'s :py:class:`tzinfo`
-            subclasses.
-
-        .. versionchanged:: 2.7.0
-
-            After version 2.7.0, any two calls to ``gettz`` using the same
-            input strings will return the same object:
-
-            .. code-block:: python3
-
-                >>> tz.gettz('America/Chicago') is tz.gettz('America/Chicago')
-                True
-
-            In addition to improving performance, this ensures that
-            `"same zone" semantics`_ are used for datetimes in the same zone.
-
-
-        .. _`TZ variable`:
-            https://www.gnu.org/software/libc/manual/html_node/TZ-Variable.html
-
-        .. _`"same zone" semantics`:
-            https://blog.ganssle.io/articles/2018/02/aware-datetime-arithmetic.html
-        """
-        def __init__(self):
-
-            self.__instances = weakref.WeakValueDictionary()
-            self.__strong_cache_size = 8
-            self.__strong_cache = OrderedDict()
-            self._cache_lock = _thread.allocate_lock()
-
-        def __call__(self, name=None):
-            with self._cache_lock:
-                rv = self.__instances.get(name, None)
-
-                if rv is None:
-                    rv = self.nocache(name=name)
-                    if not (name is None
-                            or isinstance(rv, tzlocal_classes)
-                            or rv is None):
-                        # tzlocal is slightly more complicated than the other
-                        # time zone providers because it depends on environment
-                        # at construction time, so don't cache that.
-                        #
-                        # We also cannot store weak references to None, so we
-                        # will also not store that.
-                        self.__instances[name] = rv
-                    else:
-                        # No need for strong caching, return immediately
-                        return rv
-
-                self.__strong_cache[name] = self.__strong_cache.pop(name, rv)
-
-                if len(self.__strong_cache) > self.__strong_cache_size:
-                    self.__strong_cache.popitem(last=False)
-
-            return rv
-
-        def set_cache_size(self, size):
-            with self._cache_lock:
-                self.__strong_cache_size = size
-                while len(self.__strong_cache) > size:
-                    self.__strong_cache.popitem(last=False)
-
-        def cache_clear(self):
-            with self._cache_lock:
-                self.__instances = weakref.WeakValueDictionary()
-                self.__strong_cache.clear()
-
-        @staticmethod
-        def nocache(name=None):
-            """A non-cached version of gettz"""
-            tz = None
-            if not name:
-                try:
-                    name = os.environ["TZ"]
-                except KeyError:
-                    pass
-            if name is None or name in ("", ":"):
-                for filepath in TZFILES:
-                    if not os.path.isabs(filepath):
-                        filename = filepath
-                        for path in TZPATHS:
-                            filepath = os.path.join(path, filename)
-                            if os.path.isfile(filepath):
-                                break
-                        else:
-                            continue
-                    if os.path.isfile(filepath):
-                        try:
-                            tz = tzfile(filepath)
-                            break
-                        except (IOError, OSError, ValueError):
-                            pass
-                else:
-                    tz = tzlocal()
-            else:
-                try:
-                    if name.startswith(":"):
-                        name = name[1:]
-                except TypeError as e:
-                    if isinstance(name, bytes):
-                        new_msg = "gettz argument should be str, not bytes"
-                        six.raise_from(TypeError(new_msg), e)
-                    else:
-                        raise
-                if os.path.isabs(name):
-                    if os.path.isfile(name):
-                        tz = tzfile(name)
-                    else:
-                        tz = None
-                else:
-                    for path in TZPATHS:
-                        filepath = os.path.join(path, name)
-                        if not os.path.isfile(filepath):
-                            filepath = filepath.replace(' ', '_')
-                            if not os.path.isfile(filepath):
-                                continue
-                        try:
-                            tz = tzfile(filepath)
-                            break
-                        except (IOError, OSError, ValueError):
-                            pass
-                    else:
-                        tz = None
-                        if tzwin is not None:
-                            try:
-                                tz = tzwin(name)
-                            except (WindowsError, UnicodeEncodeError):
-                                # UnicodeEncodeError is for Python 2.7 compat
-                                tz = None
-
-                        if not tz:
-                            from dateutil.zoneinfo import get_zonefile_instance
-                            tz = get_zonefile_instance().get(name)
-
-                        if not tz:
-                            for c in name:
-                                # name is not a tzstr unless it has at least
-                                # one offset. For short values of "name", an
-                                # explicit for loop seems to be the fastest way
-                                # To determine if a string contains a digit
-                                if c in "0123456789":
-                                    try:
-                                        tz = tzstr(name)
-                                    except ValueError:
-                                        pass
-                                    break
-                            else:
-                                if name in ("GMT", "UTC"):
-                                    tz = UTC
-                                elif name in time.tzname:
-                                    tz = tzlocal()
-            return tz
-
-    return GettzFunc()
+    return _GettzFunc(tzlocal_classes)
 
 
 gettz = __get_gettz()

@@ -238,10 +238,9 @@ class relativedelta(object):
             yday = yearday
             if yearday > 59:
                 self.leapdays = -1
-        if yday:
-            self._set_yearday_month_day(yday)
+        if not yday:
+            return
 
-    def _set_yearday_month_day(self, yday):
         ydayidx = [31, 59, 90, 120, 151, 181, 212,
                    243, 273, 304, 334, 366]
         for idx, ydays in enumerate(ydayidx):
@@ -388,7 +387,10 @@ class relativedelta(object):
                               second=self.second,
                               microsecond=self.microsecond)
 
-    def _add_months(self, other):
+    def _add_date(self, other):
+        if self._has_time and not isinstance(other, datetime.datetime):
+            other = datetime.datetime.fromordinal(other.toordinal())
+
         year = (self.year or other.year)+self.years
         month = self.month or other.month
         if self.months:
@@ -400,9 +402,7 @@ class relativedelta(object):
             elif month < 1:
                 year -= 1
                 month += 12
-        return year, month
 
-    def _replacement_fields(self, other, year, month):
         day = min(calendar.monthrange(year, month)[1],
                   self.day or other.day)
         repl = {"year": year, "month": month, "day": day}
@@ -410,7 +410,17 @@ class relativedelta(object):
             value = getattr(self, attr)
             if value is not None:
                 repl[attr] = value
-        return repl
+
+        days = self.days
+        if self.leapdays and month > 2 and calendar.isleap(year):
+            days += self.leapdays
+        ret = (other.replace(**repl)
+               + datetime.timedelta(days=days,
+                                    hours=self.hours,
+                                    minutes=self.minutes,
+                                    seconds=self.seconds,
+                                    microseconds=self.microseconds))
+        return self._adjust_weekday(ret)
 
     def _adjust_weekday(self, ret):
         if self.weekday:
@@ -423,22 +433,6 @@ class relativedelta(object):
                 jumpdays *= -1
             ret += datetime.timedelta(days=jumpdays)
         return ret
-
-    def _add_date(self, other):
-        if self._has_time and not isinstance(other, datetime.datetime):
-            other = datetime.datetime.fromordinal(other.toordinal())
-        year, month = self._add_months(other)
-        repl = self._replacement_fields(other, year, month)
-        days = self.days
-        if self.leapdays and month > 2 and calendar.isleap(year):
-            days += self.leapdays
-        ret = (other.replace(**repl)
-               + datetime.timedelta(days=days,
-                                    hours=self.hours,
-                                    minutes=self.minutes,
-                                    seconds=self.seconds,
-                                    microseconds=self.microseconds))
-        return self._adjust_weekday(ret)
 
     def __add__(self, other):
         if isinstance(other, relativedelta):

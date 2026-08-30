@@ -1134,6 +1134,8 @@ class rrule(rrulebase):
         byhour = self._byhour
         byminute = self._byminute
         bysecond = self._bysecond
+        iter_candidates = self._iter_candidates
+        process_iter_result = self._process_iter_result
 
         ii = _iterinfo(self)
         ii.rebuild(year, month)
@@ -1163,9 +1165,9 @@ class rrule(rrulebase):
             )
 
             # Output results
-            for res in self._iter_candidates(
+            for res in iter_candidates(
                     dayset, start, end, timeset, bysetpos, ii):
-                stop, emit, count, total = self._process_iter_result(
+                stop, emit, count, total = process_iter_result(
                     res, until, count, total
                 )
                 if stop:

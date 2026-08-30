@@ -1113,24 +1113,20 @@ class parser(object):
 
         return True, idx
 
-    def _append_ymd_second_token(self, token, info, ymd):
+    def _append_ymd_token(self, token, info, ymd, allow_unknown=False):
         if token.isdigit():
             # 01-01[-01]
             ymd.append(token)
-        else:
-            # 01-Jan[-01]
-            value = info.month(token)
-            if value is not None:
-                ymd.append(value, 'M')
-            else:
-                raise ValueError()
+            return
 
-    def _append_ymd_third_token(self, token, info, ymd):
         value = info.month(token)
         if value is not None:
+            # 01-Jan[-01]
             ymd.append(value, 'M')
-        else:
+        elif allow_unknown:
             ymd.append(token)
+        else:
+            raise ValueError()
 
     def _parse_separated_ymd(self, tokens, idx, info, ymd, value_repr,
                              len_l):
@@ -1138,11 +1134,13 @@ class parser(object):
         ymd.append(value_repr)
 
         if idx + 2 < len_l and not info.jump(tokens[idx + 2]):
-            self._append_ymd_second_token(tokens[idx + 2], info, ymd)
+            self._append_ymd_token(tokens[idx + 2], info, ymd)
 
             if idx + 3 < len_l and tokens[idx + 3] == sep:
                 # We have three members
-                self._append_ymd_third_token(tokens[idx + 4], info, ymd)
+                self._append_ymd_token(
+                    tokens[idx + 4], info, ymd, allow_unknown=True
+                )
                 idx += 2
 
             idx += 1

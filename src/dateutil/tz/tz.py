@@ -1594,56 +1594,25 @@ else:
     TZPATHS = []
 
 
-def _resolve_local_tzfile(filepath):
-    if os.path.isabs(filepath):
-        return filepath if os.path.isfile(filepath) else None
-
-    for path in TZPATHS:
-        candidate = os.path.join(path, filepath)
-        if os.path.isfile(candidate):
-            return candidate
-    return None
-
-
-def _load_local_tzfile(filepath):
-    try:
-        return True, tzfile(filepath)
-    except (IOError, OSError, ValueError):
-        return False, None
-
-
 def _get_local_tz():
     for filepath in TZFILES:
-        filepath = _resolve_local_tzfile(filepath)
-        if filepath is not None:
-            loaded, tz = _load_local_tzfile(filepath)
-            if loaded:
-                return tz
-    return tzlocal()
-
-
-def _get_tzfile_from_paths(name):
-    for path in TZPATHS:
-        filepath = os.path.join(path, name)
-        if not os.path.isfile(filepath):
-            filepath = filepath.replace(' ', '_')
-            if not os.path.isfile(filepath):
+        if not os.path.isabs(filepath):
+            for path in TZPATHS:
+                candidate = os.path.join(path, filepath)
+                if os.path.isfile(candidate):
+                    filepath = candidate
+                    break
+            else:
                 continue
+
+        if not os.path.isfile(filepath):
+            continue
+
         try:
             return tzfile(filepath)
         except (IOError, OSError, ValueError):
             pass
-    return None
-
-
-def _get_tzwin(name):
-    if tzwin is not None:
-        try:
-            return tzwin(name)
-        except (WindowsError, UnicodeEncodeError):
-            # UnicodeEncodeError is for Python 2.7 compat
-            pass
-    return None
+    return tzlocal()
 
 
 def _get_tzstr_or_local_name(name):
@@ -1665,7 +1634,13 @@ def _get_tzstr_or_local_name(name):
 
 
 def _get_fallback_tz(name):
-    tz = _get_tzwin(name)
+    tz = None
+    if tzwin is not None:
+        try:
+            tz = tzwin(name)
+        except (WindowsError, UnicodeEncodeError):
+            # UnicodeEncodeError is for Python 2.7 compat
+            pass
     if not tz:
         from dateutil.zoneinfo import get_zonefile_instance
         tz = get_zonefile_instance().get(name)
@@ -1680,10 +1655,17 @@ def _get_named_tz(name):
             return tzfile(name)
         return None
 
-    tz = _get_tzfile_from_paths(name)
-    if tz is None:
-        tz = _get_fallback_tz(name)
-    return tz
+    for path in TZPATHS:
+        filepath = os.path.join(path, name)
+        if not os.path.isfile(filepath):
+            filepath = filepath.replace(' ', '_')
+            if not os.path.isfile(filepath):
+                continue
+        try:
+            return tzfile(filepath)
+        except (IOError, OSError, ValueError):
+            pass
+    return _get_fallback_tz(name)
 
 
 class _GettzFunc(object):

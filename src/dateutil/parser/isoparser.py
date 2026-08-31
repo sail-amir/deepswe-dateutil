@@ -327,8 +327,7 @@ class isoparser(object):
         week_offset = (week - 1) * 7 + (day - 1)
         return week_1 + timedelta(days=week_offset)
 
-    def _parse_isotime_component(self, timestr, pos, comp, components,
-                                 has_sep):
+    def _parse_isotime_separator(self, timestr, pos, comp, has_sep):
         if comp == 1 and timestr[pos:pos+1] == self._TIME_SEP:
             has_sep = True
             pos += 1
@@ -336,21 +335,23 @@ class isoparser(object):
             if timestr[pos:pos+1] != self._TIME_SEP:
                 raise ValueError('Inconsistent use of colon separator')
             pos += 1
+        return pos, has_sep
 
+    def _parse_isotime_component(self, timestr, pos, comp, components):
         if comp < 3:
             # Hour, minute, second
             components[comp] = int(timestr[pos:pos + 2])
-            pos += 2
+            return pos + 2
 
-        elif comp == 3:
+        if comp == 3:
             # Fraction of a second
             frac = self._FRACTION_REGEX.match(timestr[pos:])
             if frac:
                 us_str = frac.group(1)[:6]  # Truncate to microseconds
                 components[comp] = int(us_str) * 10**(6 - len(us_str))
-                pos += len(frac.group())
+                return pos + len(frac.group())
 
-        return pos, has_sep
+        return pos
 
     def _validate_isotime(self, components, pos, len_str):
         if pos < len_str:
@@ -381,35 +382,37 @@ class isoparser(object):
                 pos = len_str
                 break
 
-            pos, has_sep = self._parse_isotime_component(
-                timestr, pos, comp, components, has_sep
+            pos, has_sep = self._parse_isotime_separator(
+                timestr, pos, comp, has_sep
+            )
+            pos = self._parse_isotime_component(
+                timestr, pos, comp, components
             )
 
         self._validate_isotime(components, pos, len_str)
         return components
 
-    def _parse_tzstr_components(self, tzstr):
+    def _parse_tzstr_sign(self, tzstr):
         if tzstr[0:1] == b'-':
-            mult = -1
+            return -1
         elif tzstr[0:1] == b'+':
-            mult = 1
+            return 1
         else:
             raise ValueError('Time zone offset requires sign')
 
-        hours = int(tzstr[1:3])
+    def _parse_tzstr_minutes(self, tzstr):
         if len(tzstr) == 3:
-            minutes = 0
+            return 0
         else:
             start = 4 if tzstr[3:4] == self._TIME_SEP else 3
-            minutes = int(tzstr[start:])
+            return int(tzstr[start:])
 
+    def _validate_tzstr_offset(self, hours, minutes):
         if minutes > 59:
             raise ValueError('Invalid minutes in time zone offset')
 
         if hours > 23:
             raise ValueError('Invalid hours in time zone offset')
-
-        return mult, hours, minutes
 
     def _parse_tzstr(self, tzstr, zero_as_utc=True):
         if tzstr == b'Z' or tzstr == b'z':
@@ -418,11 +421,14 @@ class isoparser(object):
         if len(tzstr) not in {3, 5, 6}:
             raise ValueError('Time zone offset must be 1, 3, 5 or 6 characters')
 
-        mult, hours, minutes = self._parse_tzstr_components(tzstr)
+        mult = self._parse_tzstr_sign(tzstr)
+        hours = int(tzstr[1:3])
+        minutes = self._parse_tzstr_minutes(tzstr)
 
         if zero_as_utc and hours == 0 and minutes == 0:
             return tz.UTC
         else:
+            self._validate_tzstr_offset(hours, minutes)
             return tz.tzoffset(None, mult * (hours * 60 + minutes) * 60)
 
 

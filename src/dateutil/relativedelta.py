@@ -238,9 +238,10 @@ class relativedelta(object):
             yday = yearday
             if yearday > 59:
                 self.leapdays = -1
-        if not yday:
-            return
+        if yday:
+            self._set_yearday_month_day(yday)
 
+    def _set_yearday_month_day(self, yday):
         ydayidx = [31, 59, 90, 120, 151, 181, 212,
                    243, 273, 304, 334, 366]
         for idx, ydays in enumerate(ydayidx):
@@ -422,6 +423,7 @@ class relativedelta(object):
                                     microseconds=self.microseconds))
         return self._adjust_weekday(ret)
 
+
     def _adjust_weekday(self, ret):
         if self.weekday:
             weekday, nth = self.weekday.weekday, self.weekday.n or 1
@@ -433,6 +435,7 @@ class relativedelta(object):
                 jumpdays *= -1
             ret += datetime.timedelta(days=jumpdays)
         return ret
+
 
     def __add__(self, other):
         if isinstance(other, relativedelta):

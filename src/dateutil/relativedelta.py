@@ -562,32 +562,26 @@ class relativedelta(object):
 
     __rmul__ = __mul__
 
+    def _weekday_matches(self, other):
+        if not self.weekday or not other.weekday:
+            return not self.weekday and not other.weekday
+
+        return (self.weekday.weekday == other.weekday.weekday and
+                (self.weekday.n or 1) == (other.weekday.n or 1))
+
     def __eq__(self, other):
         if not isinstance(other, relativedelta):
             return NotImplemented
-        if self.weekday or other.weekday:
-            if not self.weekday or not other.weekday:
-                return False
-            if self.weekday.weekday != other.weekday.weekday:
-                return False
-            n1, n2 = self.weekday.n, other.weekday.n
-            if n1 != n2 and not ((not n1 or n1 == 1) and (not n2 or n2 == 1)):
-                return False
-        return (self.years == other.years and
-                self.months == other.months and
-                self.days == other.days and
-                self.hours == other.hours and
-                self.minutes == other.minutes and
-                self.seconds == other.seconds and
-                self.microseconds == other.microseconds and
-                self.leapdays == other.leapdays and
-                self.year == other.year and
-                self.month == other.month and
-                self.day == other.day and
-                self.hour == other.hour and
-                self.minute == other.minute and
-                self.second == other.second and
-                self.microsecond == other.microsecond)
+
+        return (self._weekday_matches(other) and
+                (self.years, self.months, self.days, self.hours,
+                 self.minutes, self.seconds, self.microseconds,
+                 self.leapdays, self.year, self.month, self.day, self.hour,
+                 self.minute, self.second, self.microsecond) ==
+                (other.years, other.months, other.days, other.hours,
+                 other.minutes, other.seconds, other.microseconds,
+                 other.leapdays, other.year, other.month, other.day,
+                 other.hour, other.minute, other.second, other.microsecond))
 
     def __hash__(self):
         return hash((

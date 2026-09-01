@@ -100,78 +100,37 @@ class _timelex(object):
             # find a character that's not part of the current token - since
             # that character may be part of the next token, it's stored in the
             # charstack.
-            if self.charstack:
-                nextchar = self.charstack.pop(0)
-            else:
-                nextchar = self.instream.read(1)
-                while nextchar == '\x00':
-                    nextchar = self.instream.read(1)
+            nextchar = self._read_char()
 
             if not nextchar:
                 self.eof = True
                 break
-            elif not state:
-                # First character of the token - determines if we're starting
-                # to parse a word, a number or something else.
-                token = nextchar
-                if self.isword(nextchar):
-                    state = 'a'
-                elif self.isnum(nextchar):
-                    state = '0'
-                elif self.isspace(nextchar):
-                    token = ' '
-                    break  # emit token
-                else:
-                    break  # emit token
-            elif state == 'a':
-                # If we've already started reading a word, we keep reading
-                # letters until we find something that's not part of a word.
-                seenletters = True
-                if self.isword(nextchar):
-                    token += nextchar
-                elif nextchar == '.':
-                    token += nextchar
-                    state = 'a.'
-                else:
-                    self.charstack.append(nextchar)
-                    break  # emit token
-            elif state == '0':
-                # If we've already started reading a number, we keep reading
-                # numbers until we find something that doesn't fit.
-                if self.isnum(nextchar):
-                    token += nextchar
-                elif nextchar == '.' or (nextchar == ',' and len(token) >= 2):
-                    token += nextchar
-                    state = '0.'
-                else:
-                    self.charstack.append(nextchar)
-                    break  # emit token
-            elif state == 'a.':
-                # If we've seen some letters and a dot separator, continue
-                # parsing, and the tokens will be broken up later.
-                seenletters = True
-                if nextchar == '.' or self.isword(nextchar):
-                    token += nextchar
-                elif self.isnum(nextchar) and token[-1] == '.':
-                    token += nextchar
-                    state = '0.'
-                else:
-                    self.charstack.append(nextchar)
-                    break  # emit token
-            elif state == '0.':
-                # If we've seen at least one dot separator, keep going, we'll
-                # break up the tokens later.
-                if nextchar == '.' or self.isnum(nextchar):
-                    token += nextchar
-                elif self.isword(nextchar) and token[-1] == '.':
-                    token += nextchar
-                    state = 'a.'
-                else:
-                    self.charstack.append(nextchar)
-                    break  # emit token
 
-        if (state in ('a.', '0.') and (seenletters or token.count('.') > 1 or
-                                       token[-1] in '.,')):
+            if not state:
+                token, state, emit = self._start_token(nextchar)
+            else:
+                token, state, read_letters, emit = self._continue_token(
+                    token, state, nextchar)
+                seenletters = seenletters or read_letters
+
+            if emit:
+                break
+
+        return self._prepare_token(token, state, seenletters)
+
+    def _read_char(self):
+        if self.charstack:
+            return self.charstack.pop(0)
+
+        nextchar = self.instream.read(1)
+        while nextchar == '\x00':
+            nextchar = self.instream.read(1)
+
+        return nextchar
+
+    def _prepare_token(self, token, state, seenletters):
+        if (state in ('a.', '0.') and
+                (seenletters or token.count('.') > 1 or token[-1] in '.,')):
             l = self._split_decimal.split(token)
             token = l[0]
             for tok in l[1:]:
@@ -182,6 +141,64 @@ class _timelex(object):
             token = token.replace(',', '.')
 
         return token
+
+    def _start_token(self, nextchar):
+        # The first character determines whether this is a word, number,
+        # whitespace token, or standalone punctuation.
+        if self.isword(nextchar):
+            return nextchar, 'a', False
+        elif self.isnum(nextchar):
+            return nextchar, '0', False
+        elif self.isspace(nextchar):
+            return ' ', None, True
+
+        return nextchar, None, True
+
+    def _continue_token(self, token, state, nextchar):
+        if state == 'a':
+            return self._continue_word_token(token, nextchar)
+        elif state == '0':
+            return self._continue_numeric_token(token, nextchar)
+        elif state == 'a.':
+            return self._continue_word_dot_token(token, nextchar)
+
+        return self._continue_numeric_dot_token(token, nextchar)
+
+    def _continue_word_token(self, token, nextchar):
+        if self.isword(nextchar):
+            return token + nextchar, 'a', True, False
+        elif nextchar == '.':
+            return token + nextchar, 'a.', True, False
+
+        self.charstack.append(nextchar)
+        return token, 'a', True, True
+
+    def _continue_numeric_token(self, token, nextchar):
+        if self.isnum(nextchar):
+            return token + nextchar, '0', False, False
+        elif nextchar == '.' or (nextchar == ',' and len(token) >= 2):
+            return token + nextchar, '0.', False, False
+
+        self.charstack.append(nextchar)
+        return token, '0', False, True
+
+    def _continue_word_dot_token(self, token, nextchar):
+        if nextchar == '.' or self.isword(nextchar):
+            return token + nextchar, 'a.', True, False
+        elif self.isnum(nextchar) and token[-1] == '.':
+            return token + nextchar, '0.', True, False
+
+        self.charstack.append(nextchar)
+        return token, 'a.', True, True
+
+    def _continue_numeric_dot_token(self, token, nextchar):
+        if nextchar == '.' or self.isnum(nextchar):
+            return token + nextchar, '0.', False, False
+        elif self.isword(nextchar) and token[-1] == '.':
+            return token + nextchar, 'a.', False, False
+
+        self.charstack.append(nextchar)
+        return token, '0.', False, True
 
     def __iter__(self):
         return self

@@ -1328,11 +1328,44 @@ class tzical(object):
             raise ValueError("invalid offset: " + s)
 
     def _parse_rfc(self, s):
-        lines = s.splitlines()
+        lines = self._unfold_rfc_lines(s)
         if not lines:
             raise ValueError("empty string")
 
-        # Unfold
+        state = {
+            'tzid': None,
+            'comps': [],
+            'in_vtimezone': False,
+            'comptype': None,
+        }
+        for line in lines:
+            if not line:
+                continue
+            name, value = line.split(':', 1)
+            parms = name.split(';')
+            if not parms:
+                raise ValueError("empty property name")
+            name = parms[0].upper()
+            parms = parms[1:]
+            if not state['in_vtimezone']:
+                if name == "BEGIN" and value == "VTIMEZONE":
+                    state['tzid'] = None
+                    state['comps'] = []
+                    state['in_vtimezone'] = True
+                continue
+
+            if name == "BEGIN":
+                self._start_rfc_component(value, state)
+            elif name == "END":
+                self._end_rfc_component(value, state)
+            elif state['comptype']:
+                self._handle_rfc_component_property(
+                    name, value, parms, line, state)
+            else:
+                self._handle_rfc_timezone_property(name, value, parms, state)
+
+    def _unfold_rfc_lines(self, value):
+        lines = value.splitlines()
         i = 0
         while i < len(lines):
             line = lines[i].rstrip()
@@ -1343,114 +1376,88 @@ class tzical(object):
                 del lines[i]
             else:
                 i += 1
+        return lines
 
-        tzid = None
-        comps = []
-        invtz = False
-        comptype = None
-        for line in lines:
-            if not line:
-                continue
-            name, value = line.split(':', 1)
-            parms = name.split(';')
-            if not parms:
-                raise ValueError("empty property name")
-            name = parms[0].upper()
-            parms = parms[1:]
-            if invtz:
-                if name == "BEGIN":
-                    if value in ("STANDARD", "DAYLIGHT"):
-                        # Process component
-                        pass
-                    else:
-                        raise ValueError("unknown component: "+value)
-                    comptype = value
-                    founddtstart = False
-                    tzoffsetfrom = None
-                    tzoffsetto = None
-                    rrulelines = []
-                    tzname = None
-                elif name == "END":
-                    if value == "VTIMEZONE":
-                        if comptype:
-                            raise ValueError("component not closed: "+comptype)
-                        if not tzid:
-                            raise ValueError("mandatory TZID not found")
-                        if not comps:
-                            raise ValueError(
-                                "at least one component is needed")
-                        # Process vtimezone
-                        self._vtz[tzid] = _tzicalvtz(tzid, comps)
-                        invtz = False
-                    elif value == comptype:
-                        if not founddtstart:
-                            raise ValueError("mandatory DTSTART not found")
-                        if tzoffsetfrom is None:
-                            raise ValueError(
-                                "mandatory TZOFFSETFROM not found")
-                        if tzoffsetto is None:
-                            raise ValueError(
-                                "mandatory TZOFFSETFROM not found")
-                        # Process component
-                        rr = None
-                        if rrulelines:
-                            rr = rrule.rrulestr("\n".join(rrulelines),
-                                                compatible=True,
-                                                ignoretz=True,
-                                                cache=True)
-                        comp = _tzicalvtzcomp(tzoffsetfrom, tzoffsetto,
-                                              (comptype == "DAYLIGHT"),
-                                              tzname, rr)
-                        comps.append(comp)
-                        comptype = None
-                    else:
-                        raise ValueError("invalid component end: "+value)
-                elif comptype:
-                    if name == "DTSTART":
-                        # DTSTART in VTIMEZONE takes a subset of valid RRULE
-                        # values under RFC 5545.
-                        for parm in parms:
-                            if parm != 'VALUE=DATE-TIME':
-                                msg = ('Unsupported DTSTART param in ' +
-                                       'VTIMEZONE: ' + parm)
-                                raise ValueError(msg)
-                        rrulelines.append(line)
-                        founddtstart = True
-                    elif name in ("RRULE", "RDATE", "EXRULE", "EXDATE"):
-                        rrulelines.append(line)
-                    elif name == "TZOFFSETFROM":
-                        if parms:
-                            raise ValueError(
-                                "unsupported %s parm: %s " % (name, parms[0]))
-                        tzoffsetfrom = self._parse_offset(value)
-                    elif name == "TZOFFSETTO":
-                        if parms:
-                            raise ValueError(
-                                "unsupported TZOFFSETTO parm: "+parms[0])
-                        tzoffsetto = self._parse_offset(value)
-                    elif name == "TZNAME":
-                        if parms:
-                            raise ValueError(
-                                "unsupported TZNAME parm: "+parms[0])
-                        tzname = value
-                    elif name == "COMMENT":
-                        pass
-                    else:
-                        raise ValueError("unsupported property: "+name)
-                else:
-                    if name == "TZID":
-                        if parms:
-                            raise ValueError(
-                                "unsupported TZID parm: "+parms[0])
-                        tzid = value
-                    elif name in ("TZURL", "LAST-MODIFIED", "COMMENT"):
-                        pass
-                    else:
-                        raise ValueError("unsupported property: "+name)
-            elif name == "BEGIN" and value == "VTIMEZONE":
-                tzid = None
-                comps = []
-                invtz = True
+    def _start_rfc_component(self, value, state):
+        if value not in ("STANDARD", "DAYLIGHT"):
+            raise ValueError("unknown component: " + value)
+        state.update({
+            'comptype': value,
+            'founddtstart': False,
+            'tzoffsetfrom': None,
+            'tzoffsetto': None,
+            'rrulelines': [],
+            'tzname': None,
+        })
+
+    def _end_rfc_component(self, value, state):
+        if value == "VTIMEZONE":
+            if state['comptype']:
+                raise ValueError("component not closed: " +
+                                 state['comptype'])
+            if not state['tzid']:
+                raise ValueError("mandatory TZID not found")
+            if not state['comps']:
+                raise ValueError("at least one component is needed")
+            self._vtz[state['tzid']] = _tzicalvtz(
+                state['tzid'], state['comps'])
+            state['in_vtimezone'] = False
+            return
+
+        if value != state['comptype']:
+            raise ValueError("invalid component end: " + value)
+        if not state['founddtstart']:
+            raise ValueError("mandatory DTSTART not found")
+        if state['tzoffsetfrom'] is None:
+            raise ValueError("mandatory TZOFFSETFROM not found")
+        if state['tzoffsetto'] is None:
+            raise ValueError("mandatory TZOFFSETFROM not found")
+
+        rr = None
+        if state['rrulelines']:
+            rr = rrule.rrulestr("\n".join(state['rrulelines']),
+                                compatible=True, ignoretz=True, cache=True)
+        comp = _tzicalvtzcomp(
+            state['tzoffsetfrom'], state['tzoffsetto'],
+            state['comptype'] == "DAYLIGHT", state['tzname'], rr)
+        state['comps'].append(comp)
+        state['comptype'] = None
+
+    def _handle_rfc_component_property(self, name, value, parms, line, state):
+        if name == "DTSTART":
+            # DTSTART in VTIMEZONE takes a subset of valid RRULE values under
+            # RFC 5545.
+            for parm in parms:
+                if parm != 'VALUE=DATE-TIME':
+                    msg = ('Unsupported DTSTART param in VTIMEZONE: ' + parm)
+                    raise ValueError(msg)
+            state['rrulelines'].append(line)
+            state['founddtstart'] = True
+        elif name in ("RRULE", "RDATE", "EXRULE", "EXDATE"):
+            state['rrulelines'].append(line)
+        elif name == "TZOFFSETFROM":
+            if parms:
+                raise ValueError(
+                    "unsupported %s parm: %s " % (name, parms[0]))
+            state['tzoffsetfrom'] = self._parse_offset(value)
+        elif name == "TZOFFSETTO":
+            if parms:
+                raise ValueError("unsupported TZOFFSETTO parm: " + parms[0])
+            state['tzoffsetto'] = self._parse_offset(value)
+        elif name == "TZNAME":
+            if parms:
+                raise ValueError("unsupported TZNAME parm: " + parms[0])
+            state['tzname'] = value
+        elif name != "COMMENT":
+            raise ValueError("unsupported property: " + name)
+
+    def _handle_rfc_timezone_property(self, name, value, parms, state):
+        if name == "TZID":
+            if parms:
+                raise ValueError("unsupported TZID parm: " + parms[0])
+            state['tzid'] = value
+        elif name not in ("TZURL", "LAST-MODIFIED", "COMMENT"):
+            raise ValueError("unsupported property: " + name)
 
     def __repr__(self):
         return "%s(%s)" % (self.__class__.__name__, repr(self._s))

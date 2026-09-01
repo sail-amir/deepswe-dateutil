@@ -316,49 +316,9 @@ class relativedelta(object):
 
     def __add__(self, other):
         if isinstance(other, relativedelta):
-            return self.__class__(years=other.years + self.years,
-                                 months=other.months + self.months,
-                                 days=other.days + self.days,
-                                 hours=other.hours + self.hours,
-                                 minutes=other.minutes + self.minutes,
-                                 seconds=other.seconds + self.seconds,
-                                 microseconds=(other.microseconds +
-                                               self.microseconds),
-                                 leapdays=other.leapdays or self.leapdays,
-                                 year=(other.year if other.year is not None
-                                       else self.year),
-                                 month=(other.month if other.month is not None
-                                        else self.month),
-                                 day=(other.day if other.day is not None
-                                      else self.day),
-                                 weekday=(other.weekday if other.weekday is not None
-                                          else self.weekday),
-                                 hour=(other.hour if other.hour is not None
-                                       else self.hour),
-                                 minute=(other.minute if other.minute is not None
-                                         else self.minute),
-                                 second=(other.second if other.second is not None
-                                         else self.second),
-                                 microsecond=(other.microsecond if other.microsecond
-                                              is not None else
-                                              self.microsecond))
+            return self._add_relativedelta(other)
         if isinstance(other, datetime.timedelta):
-            return self.__class__(years=self.years,
-                                  months=self.months,
-                                  days=self.days + other.days,
-                                  hours=self.hours,
-                                  minutes=self.minutes,
-                                  seconds=self.seconds + other.seconds,
-                                  microseconds=self.microseconds + other.microseconds,
-                                  leapdays=self.leapdays,
-                                  year=self.year,
-                                  month=self.month,
-                                  day=self.day,
-                                  weekday=self.weekday,
-                                  hour=self.hour,
-                                  minute=self.minute,
-                                  second=self.second,
-                                  microsecond=self.microsecond)
+            return self._add_timedelta(other)
         if not isinstance(other, datetime.date):
             return NotImplemented
         elif self._has_time and not isinstance(other, datetime.datetime):
@@ -400,6 +360,53 @@ class relativedelta(object):
                 jumpdays *= -1
             ret += datetime.timedelta(days=jumpdays)
         return ret
+
+    def _add_relativedelta(self, other):
+        return self.__class__(years=other.years + self.years,
+                              months=other.months + self.months,
+                              days=other.days + self.days,
+                              hours=other.hours + self.hours,
+                              minutes=other.minutes + self.minutes,
+                              seconds=other.seconds + self.seconds,
+                              microseconds=(other.microseconds +
+                                            self.microseconds),
+                              leapdays=other.leapdays or self.leapdays,
+                              year=(other.year if other.year is not None
+                                    else self.year),
+                              month=(other.month if other.month is not None
+                                     else self.month),
+                              day=(other.day if other.day is not None
+                                   else self.day),
+                              weekday=(other.weekday if other.weekday is not None
+                                       else self.weekday),
+                              hour=(other.hour if other.hour is not None
+                                    else self.hour),
+                              minute=(other.minute if other.minute is not None
+                                      else self.minute),
+                              second=(other.second if other.second is not None
+                                      else self.second),
+                              microsecond=(other.microsecond
+                                           if other.microsecond is not None
+                                           else self.microsecond))
+
+    def _add_timedelta(self, other):
+        return self.__class__(years=self.years,
+                              months=self.months,
+                              days=self.days + other.days,
+                              hours=self.hours,
+                              minutes=self.minutes,
+                              seconds=self.seconds + other.seconds,
+                              microseconds=(self.microseconds +
+                                            other.microseconds),
+                              leapdays=self.leapdays,
+                              year=self.year,
+                              month=self.month,
+                              day=self.day,
+                              weekday=self.weekday,
+                              hour=self.hour,
+                              minute=self.minute,
+                              second=self.second,
+                              microsecond=self.microsecond)
 
     def __radd__(self, other):
         return self.__add__(other)

@@ -1555,23 +1555,10 @@ class _rrulestr(object):
 
         for parm in parms:
             if parm.startswith("TZID="):
-                try:
-                    tzkey = rule_tzids[parm.split('TZID=')[-1]]
-                except KeyError:
-                    continue
-                if tzids is None:
-                    from . import tz
-                    tzlookup = tz.gettz
-                elif callable(tzids):
-                    tzlookup = tzids
-                else:
-                    tzlookup = getattr(tzids, 'get', None)
-                    if tzlookup is None:
-                        msg = ('tzids must be a callable, mapping, or None, '
-                               'not %s' % tzids)
-                        raise ValueError(msg)
-
-                TZID = tzlookup(tzkey)
+                found, resolved_tzid = self._resolve_tzid(
+                    parm, rule_tzids, tzids)
+                if found:
+                    TZID = resolved_tzid
                 continue
 
             # RFC 5445 3.8.2.4: The VALUE parameter is optional, but may be found
@@ -1594,6 +1581,26 @@ class _rrulestr(object):
             datevals.append(date)
 
         return datevals
+
+    def _resolve_tzid(self, parm, rule_tzids, tzids):
+        try:
+            tzkey = rule_tzids[parm.split('TZID=')[-1]]
+        except KeyError:
+            return False, None
+
+        if tzids is None:
+            from . import tz
+            tzlookup = tz.gettz
+        elif callable(tzids):
+            tzlookup = tzids
+        else:
+            tzlookup = getattr(tzids, 'get', None)
+            if tzlookup is None:
+                msg = ('tzids must be a callable, mapping, or None, not %s' %
+                       tzids)
+                raise ValueError(msg)
+
+        return True, tzlookup(tzkey)
 
     def _parse_rfc(self, s,
                    dtstart=None,

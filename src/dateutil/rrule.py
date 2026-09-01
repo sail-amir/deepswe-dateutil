@@ -9,6 +9,7 @@ import calendar
 import datetime
 import heapq
 import itertools
+import operator
 import re
 import sys
 from functools import wraps
@@ -192,39 +193,24 @@ class rrulebase(object):
         """ Returns the last recurrence before the given datetime instance. The
             inc keyword defines what happens if dt is an occurrence. With
             inc=True, if dt itself is an occurrence, it will be returned. """
-        if self._cache_complete:
-            gen = self._cache
-        else:
-            gen = self
+        gen = self._cache if self._cache_complete else self
+        is_after = operator.gt if inc else operator.ge
         last = None
-        if inc:
-            for i in gen:
-                if i > dt:
-                    break
-                last = i
-        else:
-            for i in gen:
-                if i >= dt:
-                    break
-                last = i
+        for i in gen:
+            if is_after(i, dt):
+                break
+            last = i
         return last
 
     def after(self, dt, inc=False):
         """ Returns the first recurrence after the given datetime instance. The
             inc keyword defines what happens if dt is an occurrence. With
             inc=True, if dt itself is an occurrence, it will be returned.  """
-        if self._cache_complete:
-            gen = self._cache
-        else:
-            gen = self
-        if inc:
-            for i in gen:
-                if i >= dt:
-                    return i
-        else:
-            for i in gen:
-                if i > dt:
-                    return i
+        gen = self._cache if self._cache_complete else self
+        is_after = operator.ge if inc else operator.gt
+        for i in gen:
+            if is_after(i, dt):
+                return i
         return None
 
     def xafter(self, dt, count=None, inc=False):
@@ -246,16 +232,10 @@ class rrulebase(object):
         :yields: Yields a sequence of `datetime` objects.
         """
 
-        if self._cache_complete:
-            gen = self._cache
-        else:
-            gen = self
+        gen = self._cache if self._cache_complete else self
 
         # Select the comparison function
-        if inc:
-            comp = lambda dc, dtc: dc >= dtc
-        else:
-            comp = lambda dc, dtc: dc > dtc
+        comp = operator.ge if inc else operator.gt
 
         # Generate dates
         n = 0
@@ -273,32 +253,15 @@ class rrulebase(object):
         The inc keyword defines what happens if after and/or before are
         themselves occurrences. With inc=True, they will be included in the
         list, if they are found in the recurrence set. """
-        if self._cache_complete:
-            gen = self._cache
-        else:
-            gen = self
-        started = False
+        gen = self._cache if self._cache_complete else self
+        starts_range = operator.ge if inc else operator.gt
+        ends_range = operator.gt if inc else operator.ge
         l = []
-        if inc:
-            for i in gen:
-                if i > before:
-                    break
-                elif not started:
-                    if i >= after:
-                        started = True
-                        l.append(i)
-                else:
-                    l.append(i)
-        else:
-            for i in gen:
-                if i >= before:
-                    break
-                elif not started:
-                    if i > after:
-                        started = True
-                        l.append(i)
-                else:
-                    l.append(i)
+        for i in gen:
+            if ends_range(i, before):
+                break
+            if starts_range(i, after):
+                l.append(i)
         return l
 
 

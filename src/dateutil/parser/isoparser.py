@@ -400,16 +400,16 @@ class isoparser(object):
         else:
             minutes = int(tzstr[(4 if tzstr[3:4] == self._TIME_SEP else 3):])
 
+        if minutes > 59:
+            raise ValueError('Invalid minutes in time zone offset')
+
+        if hours > 23:
+            raise ValueError('Invalid hours in time zone offset')
+
         if zero_as_utc and hours == 0 and minutes == 0:
             return tz.UTC
-        else:
-            if minutes > 59:
-                raise ValueError('Invalid minutes in time zone offset')
 
-            if hours > 23:
-                raise ValueError('Invalid hours in time zone offset')
-
-            return tz.tzoffset(None, mult * (hours * 60 + minutes) * 60)
+        return tz.tzoffset(None, mult * (hours * 60 + minutes) * 60)
 
 
 DEFAULT_ISOPARSER = isoparser()

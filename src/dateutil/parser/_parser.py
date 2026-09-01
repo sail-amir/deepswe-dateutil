@@ -1456,58 +1456,9 @@ class _tzparser(object):
 
             len_l = len(l)
 
-            i = 0
-            while i < len_l:
-                # BRST+3[BRDT[+2]]
-                j = i
-                while j < len_l and not [x for x in l[j]
-                                         if x in "0123456789:,-+"]:
-                    j += 1
-                if j != i:
-                    if not res.stdabbr:
-                        offattr = "stdoffset"
-                        res.stdabbr = "".join(l[i:j])
-                    else:
-                        offattr = "dstoffset"
-                        res.dstabbr = "".join(l[i:j])
-
-                    for ii in range(j):
-                        used_idxs.append(ii)
-                    i = j
-                    if (i < len_l and (l[i] in ('+', '-') or l[i][0] in
-                                       "0123456789")):
-                        if l[i] in ('+', '-'):
-                            # Yes, that's right.  See the TZ variable
-                            # documentation.
-                            signal = (1, -1)[l[i] == '+']
-                            used_idxs.append(i)
-                            i += 1
-                        else:
-                            signal = -1
-                        len_li = len(l[i])
-                        if len_li == 4:
-                            # -0300
-                            setattr(res, offattr, (int(l[i][:2]) * 3600 +
-                                                   int(l[i][2:]) * 60) * signal)
-                        elif i + 1 < len_l and l[i + 1] == ':':
-                            # -03:00
-                            setattr(res, offattr,
-                                    (int(l[i]) * 3600 +
-                                     int(l[i + 2]) * 60) * signal)
-                            used_idxs.append(i)
-                            i += 2
-                        elif len_li <= 2:
-                            # -[0]3
-                            setattr(res, offattr,
-                                    int(l[i][:2]) * 3600 * signal)
-                        else:
-                            return None
-                        used_idxs.append(i)
-                        i += 1
-                    if res.dstabbr:
-                        break
-                else:
-                    break
+            i = self._parse_tz_abbreviations(l, res, used_idxs)
+            if i is None:
+                return None
 
 
             if i < len_l:
@@ -1525,37 +1476,7 @@ class _tzparser(object):
                   not [y for x in l[i:] if x != ','
                        for y in x if y not in "0123456789+-"]):
                 # GMT0BST,3,0,30,3600,10,0,26,7200[,3600]
-                for x in (res.start, res.end):
-                    x.month = int(l[i])
-                    used_idxs.append(i)
-                    i += 2
-                    if l[i] == '-':
-                        value = int(l[i + 1]) * -1
-                        used_idxs.append(i)
-                        i += 1
-                    else:
-                        value = int(l[i])
-                    used_idxs.append(i)
-                    i += 2
-                    if value:
-                        x.week = value
-                        x.weekday = (int(l[i]) - 1) % 7
-                    else:
-                        x.day = int(l[i])
-                    used_idxs.append(i)
-                    i += 2
-                    x.time = int(l[i])
-                    used_idxs.append(i)
-                    i += 2
-                if i < len_l:
-                    if l[i] in ('-', '+'):
-                        signal = (-1, 1)[l[i] == "+"]
-                        used_idxs.append(i)
-                        i += 1
-                    else:
-                        signal = 1
-                    used_idxs.append(i)
-                    res.dstoffset = (res.stdoffset + int(l[i]) * signal)
+                i = self._parse_legacy_tz_rules(l, i, res, used_idxs)
 
                 # This was a made-up format that is not in normal use
                 warn(('Parsed time zone "%s"' % tzstr) +
@@ -1568,69 +1489,9 @@ class _tzparser(object):
                   not [y for x in l[i:] if x not in (',', '/', 'J', 'M',
                                                      '.', '-', ':')
                        for y in x if y not in "0123456789"]):
-                for x in (res.start, res.end):
-                    if l[i] == 'J':
-                        # non-leap year day (1 based)
-                        used_idxs.append(i)
-                        i += 1
-                        x.jyday = int(l[i])
-                    elif l[i] == 'M':
-                        # month[-.]week[-.]weekday
-                        used_idxs.append(i)
-                        i += 1
-                        x.month = int(l[i])
-                        used_idxs.append(i)
-                        i += 1
-                        assert l[i] in ('-', '.')
-                        used_idxs.append(i)
-                        i += 1
-                        x.week = int(l[i])
-                        if x.week == 5:
-                            x.week = -1
-                        used_idxs.append(i)
-                        i += 1
-                        assert l[i] in ('-', '.')
-                        used_idxs.append(i)
-                        i += 1
-                        x.weekday = (int(l[i]) - 1) % 7
-                    else:
-                        # year day (zero based)
-                        x.yday = int(l[i]) + 1
-
-                    used_idxs.append(i)
-                    i += 1
-
-                    if i < len_l and l[i] == '/':
-                        used_idxs.append(i)
-                        i += 1
-                        # start time
-                        len_li = len(l[i])
-                        if len_li == 4:
-                            # -0300
-                            x.time = (int(l[i][:2]) * 3600 +
-                                      int(l[i][2:]) * 60)
-                        elif i + 1 < len_l and l[i + 1] == ':':
-                            # -03:00
-                            x.time = int(l[i]) * 3600 + int(l[i + 2]) * 60
-                            used_idxs.append(i)
-                            i += 2
-                            if i + 1 < len_l and l[i + 1] == ':':
-                                used_idxs.append(i)
-                                i += 2
-                                x.time += int(l[i])
-                        elif len_li <= 2:
-                            # -[0]3
-                            x.time = (int(l[i][:2]) * 3600)
-                        else:
-                            return None
-                        used_idxs.append(i)
-                        i += 1
-
-                    assert i == len_l or l[i] == ','
-
-                    i += 1
-
-                assert i >= len_l
+                i = self._parse_gnu_tz_rules(l, i, res, used_idxs)
+                if i is None:
+                    return None
 
         except (IndexError, ValueError, AssertionError):
             return None
@@ -1638,6 +1499,184 @@ class _tzparser(object):
         unused_idxs = set(range(len_l)).difference(used_idxs)
         res.any_unused_tokens = not {l[n] for n in unused_idxs}.issubset({",",":"})
         return res
+
+    def _parse_tz_abbreviations(self, tokens, res, used_idxs):
+        len_l = len(tokens)
+        i = 0
+
+        while i < len_l:
+            # BRST+3[BRDT[+2]]
+            j = i
+            while j < len_l and not [x for x in tokens[j]
+                                     if x in "0123456789:,-+"]:
+                j += 1
+
+            if j == i:
+                break
+
+            if not res.stdabbr:
+                offattr = "stdoffset"
+                res.stdabbr = "".join(tokens[i:j])
+            else:
+                offattr = "dstoffset"
+                res.dstabbr = "".join(tokens[i:j])
+
+            for ii in range(j):
+                used_idxs.append(ii)
+
+            i = j
+            if (i < len_l and
+                    (tokens[i] in ('+', '-') or
+                     tokens[i][0] in "0123456789")):
+                if tokens[i] in ('+', '-'):
+                    # Yes, that's right. See the TZ variable documentation.
+                    signal = (1, -1)[tokens[i] == '+']
+                    used_idxs.append(i)
+                    i += 1
+                else:
+                    signal = -1
+
+                len_li = len(tokens[i])
+                if len_li == 4:
+                    # -0300
+                    offset = (int(tokens[i][:2]) * 3600 +
+                              int(tokens[i][2:]) * 60) * signal
+                elif i + 1 < len_l and tokens[i + 1] == ':':
+                    # -03:00
+                    offset = (int(tokens[i]) * 3600 +
+                              int(tokens[i + 2]) * 60) * signal
+                    used_idxs.append(i)
+                    i += 2
+                elif len_li <= 2:
+                    # -[0]3
+                    offset = int(tokens[i][:2]) * 3600 * signal
+                else:
+                    return None
+
+                setattr(res, offattr, offset)
+                used_idxs.append(i)
+                i += 1
+
+            if res.dstabbr:
+                break
+
+        return i
+
+    def _parse_legacy_tz_rules(self, tokens, idx, res, used_idxs):
+        for attr in (res.start, res.end):
+            attr.month = int(tokens[idx])
+            used_idxs.append(idx)
+            idx += 2
+
+            if tokens[idx] == '-':
+                value = int(tokens[idx + 1]) * -1
+                used_idxs.append(idx)
+                idx += 1
+            else:
+                value = int(tokens[idx])
+
+            used_idxs.append(idx)
+            idx += 2
+
+            if value:
+                attr.week = value
+                attr.weekday = (int(tokens[idx]) - 1) % 7
+            else:
+                attr.day = int(tokens[idx])
+
+            used_idxs.append(idx)
+            idx += 2
+            attr.time = int(tokens[idx])
+            used_idxs.append(idx)
+            idx += 2
+
+        if idx < len(tokens):
+            if tokens[idx] in ('-', '+'):
+                signal = (-1, 1)[tokens[idx] == "+"]
+                used_idxs.append(idx)
+                idx += 1
+            else:
+                signal = 1
+
+            used_idxs.append(idx)
+            res.dstoffset = res.stdoffset + int(tokens[idx]) * signal
+
+        return idx
+
+    def _parse_gnu_tz_rules(self, tokens, idx, res, used_idxs):
+        for attr in (res.start, res.end):
+            idx = self._parse_tz_transition(tokens, idx, attr, used_idxs)
+            if idx is None:
+                return None
+
+            assert idx == len(tokens) or tokens[idx] == ','
+            idx += 1
+
+        assert idx >= len(tokens)
+        return idx
+
+    def _parse_tz_transition(self, tokens, idx, attr, used_idxs):
+        if tokens[idx] == 'J':
+            # Non-leap year day (1 based)
+            used_idxs.append(idx)
+            idx += 1
+            attr.jyday = int(tokens[idx])
+        elif tokens[idx] == 'M':
+            # month[-.]week[-.]weekday
+            used_idxs.append(idx)
+            idx += 1
+            attr.month = int(tokens[idx])
+            used_idxs.append(idx)
+            idx += 1
+            assert tokens[idx] in ('-', '.')
+            used_idxs.append(idx)
+            idx += 1
+            attr.week = int(tokens[idx])
+            if attr.week == 5:
+                attr.week = -1
+            used_idxs.append(idx)
+            idx += 1
+            assert tokens[idx] in ('-', '.')
+            used_idxs.append(idx)
+            idx += 1
+            attr.weekday = (int(tokens[idx]) - 1) % 7
+        else:
+            # Year day (zero based)
+            attr.yday = int(tokens[idx]) + 1
+
+        used_idxs.append(idx)
+        idx += 1
+
+        if idx < len(tokens) and tokens[idx] == '/':
+            used_idxs.append(idx)
+            idx += 1
+            idx = self._parse_tz_transition_time(tokens, idx, attr, used_idxs)
+
+        return idx
+
+    def _parse_tz_transition_time(self, tokens, idx, attr, used_idxs):
+        len_li = len(tokens[idx])
+        if len_li == 4:
+            # -0300
+            attr.time = (int(tokens[idx][:2]) * 3600 +
+                         int(tokens[idx][2:]) * 60)
+        elif idx + 1 < len(tokens) and tokens[idx + 1] == ':':
+            # -03:00
+            attr.time = int(tokens[idx]) * 3600 + int(tokens[idx + 2]) * 60
+            used_idxs.append(idx)
+            idx += 2
+            if idx + 1 < len(tokens) and tokens[idx + 1] == ':':
+                used_idxs.append(idx)
+                idx += 2
+                attr.time += int(tokens[idx])
+        elif len_li <= 2:
+            # -[0]3
+            attr.time = int(tokens[idx][:2]) * 3600
+        else:
+            return None
+
+        used_idxs.append(idx)
+        return idx + 1
 
 
 DEFAULTTZPARSER = _tzparser()

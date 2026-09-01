@@ -1633,100 +1633,145 @@ class _rrulestr(object):
         s = s.upper()
         if not s.strip():
             raise ValueError("empty string")
-        if unfold:
-            lines = s.splitlines()
-            i = 0
-            while i < len(lines):
-                line = lines[i].rstrip()
-                if not line:
-                    del lines[i]
-                elif i > 0 and line[0] == " ":
-                    lines[i-1] += line[1:]
-                    del lines[i]
-                else:
-                    i += 1
-        else:
-            lines = s.split()
+        lines = self._prepare_rfc_lines(s, unfold)
         if (not forceset and len(lines) == 1 and (s.find(':') == -1 or
                                                   s.startswith('RRULE:'))):
             return self._parse_rfc_rrule(lines[0], cache=cache,
                                          dtstart=dtstart, ignoretz=ignoretz,
                                          tzinfos=tzinfos)
-        else:
-            rrulevals = []
-            rdatevals = []
-            exrulevals = []
-            exdatevals = []
-            for line in lines:
-                if not line:
-                    continue
-                if line.find(':') == -1:
-                    name = "RRULE"
-                    value = line
-                else:
-                    name, value = line.split(':', 1)
-                parms = name.split(';')
-                if not parms:
-                    raise ValueError("empty property name")
-                name = parms[0]
-                parms = parms[1:]
-                if name == "RRULE":
-                    for parm in parms:
-                        raise ValueError("unsupported RRULE parm: "+parm)
-                    rrulevals.append(value)
-                elif name == "RDATE":
-                    for parm in parms:
-                        if parm != "VALUE=DATE-TIME":
-                            raise ValueError("unsupported RDATE parm: "+parm)
-                    rdatevals.append(value)
-                elif name == "EXRULE":
-                    for parm in parms:
-                        raise ValueError("unsupported EXRULE parm: "+parm)
-                    exrulevals.append(value)
-                elif name == "EXDATE":
-                    exdatevals.extend(
-                        self._parse_date_value(value, parms,
-                                               TZID_NAMES, ignoretz,
-                                               tzids, tzinfos)
-                    )
-                elif name == "DTSTART":
-                    dtvals = self._parse_date_value(value, parms, TZID_NAMES,
-                                                    ignoretz, tzids, tzinfos)
-                    if len(dtvals) != 1:
-                        raise ValueError("Multiple DTSTART values specified:" +
-                                         value)
-                    dtstart = dtvals[0]
-                else:
-                    raise ValueError("unsupported property: "+name)
-            if (forceset or len(rrulevals) > 1 or rdatevals
-                    or exrulevals or exdatevals):
-                if not parser and (rdatevals or exdatevals):
-                    from dateutil import parser
-                rset = rruleset(cache=cache)
-                for value in rrulevals:
-                    rset.rrule(self._parse_rfc_rrule(value, dtstart=dtstart,
-                                                     ignoretz=ignoretz,
-                                                     tzinfos=tzinfos))
-                for value in rdatevals:
-                    for datestr in value.split(','):
-                        rset.rdate(parser.parse(datestr,
-                                                ignoretz=ignoretz,
-                                                tzinfos=tzinfos))
-                for value in exrulevals:
-                    rset.exrule(self._parse_rfc_rrule(value, dtstart=dtstart,
-                                                      ignoretz=ignoretz,
-                                                      tzinfos=tzinfos))
-                for value in exdatevals:
-                    rset.exdate(value)
-                if compatible and dtstart:
-                    rset.rdate(dtstart)
-                return rset
+
+        date_context = {
+            "dtstart": dtstart,
+            "rule_tzids": TZID_NAMES,
+            "ignoretz": ignoretz,
+            "tzids": tzids,
+            "tzinfos": tzinfos,
+        }
+        parsed = self._parse_rfc_content(lines, date_context)
+        options = {
+            "cache": cache,
+            "forceset": forceset,
+            "compatible": compatible,
+            "ignoretz": ignoretz,
+            "tzinfos": tzinfos,
+        }
+        return self._build_rfc_result(parsed, date_context["dtstart"], options)
+
+    def _prepare_rfc_lines(self, value, unfold):
+        if not unfold:
+            return value.split()
+
+        lines = value.splitlines()
+        i = 0
+        while i < len(lines):
+            line = lines[i].rstrip()
+            if not line:
+                del lines[i]
+            elif i > 0 and line[0] == " ":
+                lines[i - 1] += line[1:]
+                del lines[i]
             else:
-                return self._parse_rfc_rrule(rrulevals[0],
-                                             dtstart=dtstart,
-                                             cache=cache,
-                                             ignoretz=ignoretz,
-                                             tzinfos=tzinfos)
+                i += 1
+
+        return lines
+
+    def _parse_rfc_content(self, lines, date_context):
+        parsed = {
+            "rrule": [],
+            "rdate": [],
+            "exrule": [],
+            "exdate": [],
+        }
+
+        for line in lines:
+            if not line:
+                continue
+            if line.find(':') == -1:
+                name = "RRULE"
+                value = line
+            else:
+                name, value = line.split(':', 1)
+
+            parms = name.split(';')
+            if not parms:
+                raise ValueError("empty property name")
+            name = parms[0]
+            parms = parms[1:]
+
+            if name == "RRULE":
+                for parm in parms:
+                    raise ValueError("unsupported RRULE parm: " + parm)
+                parsed["rrule"].append(value)
+            elif name == "RDATE":
+                for parm in parms:
+                    if parm != "VALUE=DATE-TIME":
+                        raise ValueError("unsupported RDATE parm: " + parm)
+                parsed["rdate"].append(value)
+            elif name == "EXRULE":
+                for parm in parms:
+                    raise ValueError("unsupported EXRULE parm: " + parm)
+                parsed["exrule"].append(value)
+            elif name == "EXDATE":
+                parsed["exdate"].extend(self._parse_date_value(
+                    value, parms, date_context["rule_tzids"],
+                    date_context["ignoretz"], date_context["tzids"],
+                    date_context["tzinfos"]
+                ))
+            elif name == "DTSTART":
+                dtvals = self._parse_date_value(
+                    value, parms, date_context["rule_tzids"],
+                    date_context["ignoretz"], date_context["tzids"],
+                    date_context["tzinfos"]
+                )
+                if len(dtvals) != 1:
+                    raise ValueError("Multiple DTSTART values specified:" +
+                                     value)
+                date_context["dtstart"] = dtvals[0]
+            else:
+                raise ValueError("unsupported property: " + name)
+
+        return parsed
+
+    def _build_rfc_result(self, parsed, dtstart, options):
+        global parser
+        rrulevals = parsed["rrule"]
+        rdatevals = parsed["rdate"]
+        exrulevals = parsed["exrule"]
+        exdatevals = parsed["exdate"]
+
+        if not (options["forceset"] or len(rrulevals) > 1 or rdatevals or
+                exrulevals or exdatevals):
+            return self._parse_rfc_rrule(
+                rrulevals[0], dtstart=dtstart, cache=options["cache"],
+                ignoretz=options["ignoretz"], tzinfos=options["tzinfos"]
+            )
+
+        if not parser and (rdatevals or exdatevals):
+            from dateutil import parser
+
+        rset = rruleset(cache=options["cache"])
+        for value in rrulevals:
+            rset.rrule(self._parse_rfc_rrule(
+                value, dtstart=dtstart, ignoretz=options["ignoretz"],
+                tzinfos=options["tzinfos"]
+            ))
+        for value in rdatevals:
+            for datestr in value.split(','):
+                rset.rdate(parser.parse(
+                    datestr, ignoretz=options["ignoretz"],
+                    tzinfos=options["tzinfos"]
+                ))
+        for value in exrulevals:
+            rset.exrule(self._parse_rfc_rrule(
+                value, dtstart=dtstart, ignoretz=options["ignoretz"],
+                tzinfos=options["tzinfos"]
+            ))
+        for value in exdatevals:
+            rset.exdate(value)
+        if options["compatible"] and dtstart:
+            rset.rdate(dtstart)
+
+        return rset
 
     def __call__(self, s, **kwargs):
         return self._parse_rfc(s, **kwargs)

@@ -898,33 +898,11 @@ class parser(object):
 
         elif len_li == 6 or (len_li > 6 and tokens[idx].find('.') == 6):
             # YYMMDD or HHMMSS[.ss]
-            s = tokens[idx]
-
-            if not ymd and '.' not in tokens[idx]:
-                ymd.append(s[:2])
-                ymd.append(s[2:4])
-                ymd.append(s[4:])
-            else:
-                # 19990101T235959[.59]
-
-                # TODO: Check if res attributes already set.
-                res.hour = int(s[:2])
-                res.minute = int(s[2:4])
-                res.second, res.microsecond = self._parsems(s[4:])
+            self._parse_compact_date_or_time(value_repr, ymd, res)
 
         elif len_li in (8, 12, 14):
             # YYYYMMDD
-            s = tokens[idx]
-            ymd.append(s[:4], 'Y')
-            ymd.append(s[4:6])
-            ymd.append(s[6:8])
-
-            if len_li > 8:
-                res.hour = int(s[8:10])
-                res.minute = int(s[10:12])
-
-                if len_li > 12:
-                    res.second = int(s[12:])
+            self._parse_compact_ymd(value_repr, ymd, res)
 
         elif self._find_hms_idx(idx, tokens, info, allow_jump=True) is not None:
             # HH[ ]h or MM[ ]m or SS[.ss][ ]s
@@ -937,46 +915,10 @@ class parser(object):
 
         elif idx + 2 < len_l and tokens[idx + 1] == ':':
             # HH:MM[:SS[.ss]]
-            res.hour = int(value)
-            value = self._to_decimal(tokens[idx + 2])  # TODO: try/except for this?
-            (res.minute, res.second) = self._parse_min_sec(value)
-
-            if idx + 4 < len_l and tokens[idx + 3] == ':':
-                res.second, res.microsecond = self._parsems(tokens[idx + 4])
-
-                idx += 2
-
-            idx += 2
+            idx = self._parse_colon_time(tokens, idx, value, res)
 
         elif idx + 1 < len_l and tokens[idx + 1] in ('-', '/', '.'):
-            sep = tokens[idx + 1]
-            ymd.append(value_repr)
-
-            if idx + 2 < len_l and not info.jump(tokens[idx + 2]):
-                if tokens[idx + 2].isdigit():
-                    # 01-01[-01]
-                    ymd.append(tokens[idx + 2])
-                else:
-                    # 01-Jan[-01]
-                    value = info.month(tokens[idx + 2])
-
-                    if value is not None:
-                        ymd.append(value, 'M')
-                    else:
-                        raise ValueError()
-
-                if idx + 3 < len_l and tokens[idx + 3] == sep:
-                    # We have three members
-                    value = info.month(tokens[idx + 4])
-
-                    if value is not None:
-                        ymd.append(value, 'M')
-                    else:
-                        ymd.append(tokens[idx + 4])
-                    idx += 2
-
-                idx += 1
-            idx += 1
+            idx = self._parse_delimited_date(tokens, idx, info, ymd)
 
         elif idx + 1 >= len_l or info.jump(tokens[idx + 1]):
             if idx + 2 < len_l and info.ampm(tokens[idx + 2]) is not None:
@@ -1002,6 +944,72 @@ class parser(object):
             raise ValueError()
 
         return idx
+
+    def _parse_compact_date_or_time(self, value_repr, ymd, res):
+        if not ymd and '.' not in value_repr:
+            ymd.append(value_repr[:2])
+            ymd.append(value_repr[2:4])
+            ymd.append(value_repr[4:])
+        else:
+            # 19990101T235959[.59]
+            # TODO: Check if res attributes already set.
+            res.hour = int(value_repr[:2])
+            res.minute = int(value_repr[2:4])
+            res.second, res.microsecond = self._parsems(value_repr[4:])
+
+    def _parse_compact_ymd(self, value_repr, ymd, res):
+        ymd.append(value_repr[:4], 'Y')
+        ymd.append(value_repr[4:6])
+        ymd.append(value_repr[6:8])
+
+        if len(value_repr) > 8:
+            res.hour = int(value_repr[8:10])
+            res.minute = int(value_repr[10:12])
+
+            if len(value_repr) > 12:
+                res.second = int(value_repr[12:])
+
+    def _parse_colon_time(self, tokens, idx, value, res):
+        res.hour = int(value)
+        value = self._to_decimal(tokens[idx + 2])  # TODO: try/except for this?
+        (res.minute, res.second) = self._parse_min_sec(value)
+
+        if idx + 4 < len(tokens) and tokens[idx + 3] == ':':
+            res.second, res.microsecond = self._parsems(tokens[idx + 4])
+            idx += 2
+
+        return idx + 2
+
+    def _parse_delimited_date(self, tokens, idx, info, ymd):
+        sep = tokens[idx + 1]
+        ymd.append(tokens[idx])
+
+        if idx + 2 < len(tokens) and not info.jump(tokens[idx + 2]):
+            if tokens[idx + 2].isdigit():
+                # 01-01[-01]
+                ymd.append(tokens[idx + 2])
+            else:
+                # 01-Jan[-01]
+                value = info.month(tokens[idx + 2])
+
+                if value is not None:
+                    ymd.append(value, 'M')
+                else:
+                    raise ValueError()
+
+            if idx + 3 < len(tokens) and tokens[idx + 3] == sep:
+                # We have three members
+                value = info.month(tokens[idx + 4])
+
+                if value is not None:
+                    ymd.append(value, 'M')
+                else:
+                    ymd.append(tokens[idx + 4])
+                idx += 2
+
+            idx += 1
+
+        return idx + 1
 
     def _find_hms_idx(self, idx, tokens, info, allow_jump):
         len_l = len(tokens)

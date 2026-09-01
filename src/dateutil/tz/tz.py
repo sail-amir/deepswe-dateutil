@@ -1606,12 +1606,12 @@ def __get_gettz():
         @staticmethod
         def nocache(name=None):
             """A non-cached version of gettz"""
-            tz = None
             if not name:
                 try:
                     name = os.environ["TZ"]
                 except KeyError:
                     pass
+
             if name is None or name in ("", ":"):
                 for filepath in TZFILES:
                     if not os.path.isabs(filepath):
@@ -1624,70 +1624,64 @@ def __get_gettz():
                             continue
                     if os.path.isfile(filepath):
                         try:
-                            tz = tzfile(filepath)
-                            break
+                            return tzfile(filepath)
                         except (IOError, OSError, ValueError):
                             pass
-                else:
-                    tz = tzlocal()
-            else:
+                return tzlocal()
+
+            try:
+                if name.startswith(":"):
+                    name = name[1:]
+            except TypeError as e:
+                if isinstance(name, bytes):
+                    new_msg = "gettz argument should be str, not bytes"
+                    six.raise_from(TypeError(new_msg), e)
+                raise
+
+            if os.path.isabs(name):
+                if os.path.isfile(name):
+                    return tzfile(name)
+                return None
+
+            for path in TZPATHS:
+                filepath = os.path.join(path, name)
+                if not os.path.isfile(filepath):
+                    filepath = filepath.replace(' ', '_')
+                    if not os.path.isfile(filepath):
+                        continue
                 try:
-                    if name.startswith(":"):
-                        name = name[1:]
-                except TypeError as e:
-                    if isinstance(name, bytes):
-                        new_msg = "gettz argument should be str, not bytes"
-                        six.raise_from(TypeError(new_msg), e)
-                    else:
-                        raise
-                if os.path.isabs(name):
-                    if os.path.isfile(name):
-                        tz = tzfile(name)
-                    else:
-                        tz = None
-                else:
-                    for path in TZPATHS:
-                        filepath = os.path.join(path, name)
-                        if not os.path.isfile(filepath):
-                            filepath = filepath.replace(' ', '_')
-                            if not os.path.isfile(filepath):
-                                continue
-                        try:
-                            tz = tzfile(filepath)
-                            break
-                        except (IOError, OSError, ValueError):
-                            pass
-                    else:
-                        tz = None
-                        if tzwin is not None:
-                            try:
-                                tz = tzwin(name)
-                            except (WindowsError, UnicodeEncodeError):
-                                # UnicodeEncodeError is for Python 2.7 compat
-                                tz = None
+                    return tzfile(filepath)
+                except (IOError, OSError, ValueError):
+                    pass
 
-                        if not tz:
-                            from dateutil.zoneinfo import get_zonefile_instance
-                            tz = get_zonefile_instance().get(name)
+            if tzwin is not None:
+                try:
+                    tz = tzwin(name)
+                except (WindowsError, UnicodeEncodeError):
+                    # UnicodeEncodeError is for Python 2.7 compat
+                    tz = None
+                if tz:
+                    return tz
 
-                        if not tz:
-                            for c in name:
-                                # name is not a tzstr unless it has at least
-                                # one offset. For short values of "name", an
-                                # explicit for loop seems to be the fastest way
-                                # To determine if a string contains a digit
-                                if c in "0123456789":
-                                    try:
-                                        tz = tzstr(name)
-                                    except ValueError:
-                                        pass
-                                    break
-                            else:
-                                if name in ("GMT", "UTC"):
-                                    tz = UTC
-                                elif name in time.tzname:
-                                    tz = tzlocal()
-            return tz
+            from dateutil.zoneinfo import get_zonefile_instance
+            tz = get_zonefile_instance().get(name)
+            if tz:
+                return tz
+
+            for c in name:
+                # name is not a tzstr unless it has at least one offset. For
+                # short values of "name", an explicit for loop is fastest.
+                if c in "0123456789":
+                    try:
+                        return tzstr(name)
+                    except ValueError:
+                        return None
+
+            if name in ("GMT", "UTC"):
+                return UTC
+            if name in time.tzname:
+                return tzlocal()
+            return None
 
     return GettzFunc()
 

@@ -1531,18 +1531,22 @@ class _rrulestr(object):
             value = line
         rrkwargs = {}
         for pair in value.split(';'):
-            name, value = pair.split('=')
-            name = name.upper()
-            value = value.upper()
-            try:
-                getattr(self, "_handle_"+name)(rrkwargs, name, value,
-                                               ignoretz=ignoretz,
-                                               tzinfos=tzinfos)
-            except AttributeError:
-                raise ValueError("unknown parameter '%s'" % name)
-            except (KeyError, ValueError):
-                raise ValueError("invalid '%s': %s" % (name, value))
+            self._handle_rfc_rrule_pair(
+                rrkwargs, pair, ignoretz=ignoretz, tzinfos=tzinfos)
         return rrule(dtstart=dtstart, cache=cache, **rrkwargs)
+
+    def _handle_rfc_rrule_pair(self, rrkwargs, pair, ignoretz, tzinfos):
+        name, value = pair.split('=')
+        name = name.upper()
+        value = value.upper()
+        try:
+            getattr(self, "_handle_"+name)(rrkwargs, name, value,
+                                           ignoretz=ignoretz,
+                                           tzinfos=tzinfos)
+        except AttributeError:
+            raise ValueError("unknown parameter '%s'" % name)
+        except (KeyError, ValueError):
+            raise ValueError("invalid '%s': %s" % (name, value))
 
     def _parse_date_value(self, date_value, parms, rule_tzids,
                           ignoretz, tzids, tzinfos):

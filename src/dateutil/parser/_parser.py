@@ -550,28 +550,37 @@ class _ymd(list):
 
     def _resolve_three(self, mstridx, yearfirst, dayfirst):
         if mstridx == 0:
-            if self[1] > 31:
-                # Apr-2003-25
-                return self[1], self[0], self[2]
-
-            return self[2], self[0], self[1]
+            return self._resolve_three_month_first()
         elif mstridx == 1:
-            if self[0] > 31 or (yearfirst and self[2] <= 31):
-                # 99-Jan-01
-                return self[0], self[1], self[2]
-
-            # 01-Jan-01: give precedence to day-first, since two-digit years
-            # are usually hand-written.
-            return self[2], self[1], self[0]
+            return self._resolve_three_month_middle(yearfirst)
         elif mstridx == 2:
-            if self[1] > 31:
-                # 01-99-Jan
-                return self[1], self[2], self[0]
-
-            # 99-01-Jan
-            return self[0], self[2], self[1]
+            return self._resolve_three_month_last()
 
         return self._resolve_three_without_month_str(yearfirst, dayfirst)
+
+    def _resolve_three_month_first(self):
+        if self[1] > 31:
+            # Apr-2003-25
+            return self[1], self[0], self[2]
+
+        return self[2], self[0], self[1]
+
+    def _resolve_three_month_middle(self, yearfirst):
+        if self[0] > 31 or (yearfirst and self[2] <= 31):
+            # 99-Jan-01
+            return self[0], self[1], self[2]
+
+        # 01-Jan-01: give precedence to day-first, since two-digit years are
+        # usually hand-written.
+        return self[2], self[1], self[0]
+
+    def _resolve_three_month_last(self):
+        if self[1] > 31:
+            # 01-99-Jan
+            return self[1], self[2], self[0]
+
+        # 99-01-Jan
+        return self[0], self[2], self[1]
 
     def _resolve_three_without_month_str(self, yearfirst, dayfirst):
         if (self[0] > 31 or
@@ -945,11 +954,7 @@ class parser(object):
              (tokens[idx + 1] != ':' and
               info.hms(tokens[idx + 1]) is None))):
             # 19990101T23[59]
-            s = tokens[idx]
-            res.hour = int(s[:2])
-
-            if len_li == 4:
-                res.minute = int(s[2:])
+            self._parse_ymd_time(value_repr, res)
 
         elif len_li == 6 or (len_li > 6 and tokens[idx].find('.') == 6):
             # YYMMDD or HHMMSS[.ss]
@@ -961,12 +966,7 @@ class parser(object):
 
         elif self._find_hms_idx(idx, tokens, info, allow_jump=True) is not None:
             # HH[ ]h or MM[ ]m or SS[.ss][ ]s
-            hms_idx = self._find_hms_idx(idx, tokens, info, allow_jump=True)
-            (idx, hms) = self._parse_hms(idx, tokens, info, hms_idx)
-            if hms is not None:
-                # TODO: checking that hour/minute/second are not
-                # already set?
-                self._assign_hms(res, value_repr, hms)
+            idx = self._parse_labeled_time(tokens, idx, info, res)
 
         elif idx + 2 < len_l and tokens[idx + 1] == ':':
             # HH:MM[:SS[.ss]]
@@ -975,15 +975,15 @@ class parser(object):
         elif idx + 1 < len_l and tokens[idx + 1] in ('-', '/', '.'):
             idx = self._parse_delimited_date(tokens, idx, info, ymd)
 
+        elif self._is_space_separated_ampm(tokens, idx, info):
+            # 12 am
+            hour = int(value)
+            res.hour = self._adjust_ampm(hour, info.ampm(tokens[idx + 2]))
+            idx += 2
+
         elif idx + 1 >= len_l or info.jump(tokens[idx + 1]):
-            if idx + 2 < len_l and info.ampm(tokens[idx + 2]) is not None:
-                # 12 am
-                hour = int(value)
-                res.hour = self._adjust_ampm(hour, info.ampm(tokens[idx + 2]))
-                idx += 1
-            else:
-                # Year, month or day
-                ymd.append(value)
+            # Year, month or day
+            ymd.append(value)
             idx += 1
 
         elif info.ampm(tokens[idx + 1]) is not None and (0 <= value < 24):
@@ -999,6 +999,26 @@ class parser(object):
             raise ValueError()
 
         return idx
+
+    def _parse_ymd_time(self, value_repr, res):
+        res.hour = int(value_repr[:2])
+        if len(value_repr) == 4:
+            res.minute = int(value_repr[2:])
+
+    def _parse_labeled_time(self, tokens, idx, info, res):
+        value_repr = tokens[idx]
+        hms_idx = self._find_hms_idx(idx, tokens, info, allow_jump=True)
+        idx, hms = self._parse_hms(idx, tokens, info, hms_idx)
+        if hms is not None:
+            # TODO: checking that hour/minute/second are not already set?
+            self._assign_hms(res, value_repr, hms)
+
+        return idx
+
+    def _is_space_separated_ampm(self, tokens, idx, info):
+        return ((idx + 1 >= len(tokens) or info.jump(tokens[idx + 1])) and
+                idx + 2 < len(tokens) and
+                info.ampm(tokens[idx + 2]) is not None)
 
     def _parse_compact_date_or_time(self, value_repr, ymd, res):
         if not ymd and '.' not in value_repr:
@@ -1039,32 +1059,32 @@ class parser(object):
         sep = tokens[idx + 1]
         ymd.append(tokens[idx])
 
-        if idx + 2 < len(tokens) and not info.jump(tokens[idx + 2]):
-            if tokens[idx + 2].isdigit():
-                # 01-01[-01]
-                ymd.append(tokens[idx + 2])
-            else:
-                # 01-Jan[-01]
-                value = info.month(tokens[idx + 2])
+        second_idx = idx + 2
+        if second_idx >= len(tokens) or info.jump(tokens[second_idx]):
+            return idx + 1
 
-                if value is not None:
-                    ymd.append(value, 'M')
-                else:
-                    raise ValueError()
+        if tokens[second_idx].isdigit():
+            # 01-01[-01]
+            ymd.append(tokens[second_idx])
+        else:
+            # 01-Jan[-01]
+            value = info.month(tokens[second_idx])
+            if value is None:
+                raise ValueError()
+            ymd.append(value, 'M')
 
-            if idx + 3 < len(tokens) and tokens[idx + 3] == sep:
-                # We have three members
-                value = info.month(tokens[idx + 4])
+        if second_idx + 1 >= len(tokens) or tokens[second_idx + 1] != sep:
+            return second_idx
 
-                if value is not None:
-                    ymd.append(value, 'M')
-                else:
-                    ymd.append(tokens[idx + 4])
-                idx += 2
+        # We have three members
+        third_idx = second_idx + 2
+        value = info.month(tokens[third_idx])
+        if value is not None:
+            ymd.append(value, 'M')
+        else:
+            ymd.append(tokens[third_idx])
 
-            idx += 1
-
-        return idx + 1
+        return third_idx
 
     def _find_hms_idx(self, idx, tokens, info, allow_jump):
         len_l = len(tokens)

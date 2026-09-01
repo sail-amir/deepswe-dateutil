@@ -444,31 +444,33 @@ class _ymd(list):
 
     def append(self, val, label=None):
         if hasattr(val, '__len__'):
-            if val.isdigit() and len(val) > 2:
-                self.century_specified = True
-                if label not in [None, 'Y']:  # pragma: no cover
-                    raise ValueError(label)
-                label = 'Y'
-        elif val > 100:
+            is_century = val.isdigit() and len(val) > 2
+        else:
+            is_century = val > 100
+
+        if is_century:
             self.century_specified = True
             if label not in [None, 'Y']:  # pragma: no cover
                 raise ValueError(label)
             label = 'Y'
 
         super(self.__class__, self).append(int(val))
+        self._set_str_index(label)
 
-        if label == 'M':
-            if self.has_month:
-                raise ValueError('Month is already set')
-            self.mstridx = len(self) - 1
-        elif label == 'D':
-            if self.has_day:
-                raise ValueError('Day is already set')
-            self.dstridx = len(self) - 1
-        elif label == 'Y':
-            if self.has_year:
-                raise ValueError('Year is already set')
-            self.ystridx = len(self) - 1
+    def _set_str_index(self, label):
+        label_attrs = {
+            'M': ('mstridx', 'Month'),
+            'D': ('dstridx', 'Day'),
+            'Y': ('ystridx', 'Year'),
+        }
+        if label not in label_attrs:
+            return
+
+        attr, name = label_attrs[label]
+        if getattr(self, attr) is not None:
+            raise ValueError(name + ' is already set')
+
+        setattr(self, attr, len(self) - 1)
 
     def _resolve_from_stridxs(self, strids):
         """

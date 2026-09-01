@@ -473,7 +473,6 @@ class _ymd(list):
 
     def resolve_ymd(self, yearfirst, dayfirst):
         len_ymd = len(self)
-        year, month, day = (None, None, None)
 
         strids = (('y', self.ystridx),
                   ('m', self.mstridx),
@@ -489,80 +488,87 @@ class _ymd(list):
         if len_ymd > 3:
             raise ValueError("More than three YMD values")
         elif len_ymd == 1 or (mstridx is not None and len_ymd == 2):
-            # One member, or two members with a month string
-            if mstridx is not None:
-                month = self[mstridx]
-                # since mstridx is 0 or 1, self[mstridx-1] always
-                # looks up the other element
-                other = self[mstridx - 1]
-            else:
-                other = self[0]
-
-            if len_ymd > 1 or mstridx is None:
-                if other > 31:
-                    year = other
-                else:
-                    day = other
-
+            return self._resolve_one_or_month(mstridx)
         elif len_ymd == 2:
-            # Two members with numbers
-            if self[0] > 31:
-                # 99-01
-                year, month = self
-            elif self[1] > 31:
-                # 01-99
-                month, year = self
-            elif dayfirst and self[1] <= 12:
-                # 13-01
-                day, month = self
-            else:
-                # 01-13
-                month, day = self
-
+            return self._resolve_two(dayfirst)
         elif len_ymd == 3:
-            # Three members
-            if mstridx == 0:
-                if self[1] > 31:
-                    # Apr-2003-25
-                    month, year, day = self
-                else:
-                    month, day, year = self
-            elif mstridx == 1:
-                if self[0] > 31 or (yearfirst and self[2] <= 31):
-                    # 99-Jan-01
-                    year, month, day = self
-                else:
-                    # 01-Jan-01
-                    # Give precedence to day-first, since
-                    # two-digit years is usually hand-written.
-                    day, month, year = self
+            return self._resolve_three(mstridx, yearfirst, dayfirst)
 
-            elif mstridx == 2:
-                # WTF!?
-                if self[1] > 31:
-                    # 01-99-Jan
-                    day, year, month = self
-                else:
-                    # 99-01-Jan
-                    year, day, month = self
+        return None, None, None
 
+    def _resolve_one_or_month(self, mstridx):
+        year, month, day = (None, None, None)
+
+        if mstridx is not None:
+            month = self[mstridx]
+            # Since mstridx is 0 or 1, self[mstridx - 1] always looks up the
+            # other element.
+            other = self[mstridx - 1]
+        else:
+            other = self[0]
+
+        if len(self) > 1 or mstridx is None:
+            if other > 31:
+                year = other
             else:
-                if (self[0] > 31 or
-                    self.ystridx == 0 or
-                        (yearfirst and self[1] <= 12 and self[2] <= 31)):
-                    # 99-01-01
-                    if dayfirst and self[2] <= 12:
-                        year, day, month = self
-                    else:
-                        year, month, day = self
-                elif self[0] > 12 or (dayfirst and self[1] <= 12):
-                    # 13-01-01
-                    day, month, year = self
-                else:
-                    # 01-13-01
-                    month, day, year = self
+                day = other
 
         return year, month, day
+
+    def _resolve_two(self, dayfirst):
+        if self[0] > 31:
+            # 99-01
+            return self[0], self[1], None
+        elif self[1] > 31:
+            # 01-99
+            return self[1], self[0], None
+        elif dayfirst and self[1] <= 12:
+            # 13-01
+            return None, self[1], self[0]
+
+        # 01-13
+        return None, self[0], self[1]
+
+    def _resolve_three(self, mstridx, yearfirst, dayfirst):
+        if mstridx == 0:
+            if self[1] > 31:
+                # Apr-2003-25
+                return self[1], self[0], self[2]
+
+            return self[2], self[0], self[1]
+        elif mstridx == 1:
+            if self[0] > 31 or (yearfirst and self[2] <= 31):
+                # 99-Jan-01
+                return self[0], self[1], self[2]
+
+            # 01-Jan-01: give precedence to day-first, since two-digit years
+            # are usually hand-written.
+            return self[2], self[1], self[0]
+        elif mstridx == 2:
+            if self[1] > 31:
+                # 01-99-Jan
+                return self[1], self[2], self[0]
+
+            # 99-01-Jan
+            return self[0], self[2], self[1]
+
+        return self._resolve_three_without_month_str(yearfirst, dayfirst)
+
+    def _resolve_three_without_month_str(self, yearfirst, dayfirst):
+        if (self[0] > 31 or
+                self.ystridx == 0 or
+                (yearfirst and self[1] <= 12 and self[2] <= 31)):
+            # 99-01-01
+            if dayfirst and self[2] <= 12:
+                return self[0], self[2], self[1]
+
+            return self[0], self[1], self[2]
+        elif self[0] > 12 or (dayfirst and self[1] <= 12):
+            # 13-01-01
+            return self[2], self[1], self[0]
+
+        # 01-13-01
+        return self[2], self[0], self[1]
 
 
 class parser(object):

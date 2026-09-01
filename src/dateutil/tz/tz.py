@@ -1359,8 +1359,8 @@ class tzical(object):
             elif name == "END":
                 self._end_rfc_component(value, state)
             elif state['comptype']:
-                self._handle_rfc_component_property(
-                    name, value, parms, line, state)
+                property_value = (name, value, parms, line)
+                self._handle_rfc_component_property(property_value, state)
             else:
                 self._handle_rfc_timezone_property(name, value, parms, state)
 
@@ -1392,18 +1392,22 @@ class tzical(object):
 
     def _end_rfc_component(self, value, state):
         if value == "VTIMEZONE":
-            if state['comptype']:
-                raise ValueError("component not closed: " +
-                                 state['comptype'])
-            if not state['tzid']:
-                raise ValueError("mandatory TZID not found")
-            if not state['comps']:
-                raise ValueError("at least one component is needed")
-            self._vtz[state['tzid']] = _tzicalvtz(
-                state['tzid'], state['comps'])
-            state['in_vtimezone'] = False
+            self._finish_rfc_timezone(state)
             return
+        self._finish_rfc_observance(value, state)
 
+    def _finish_rfc_timezone(self, state):
+        if state['comptype']:
+            raise ValueError("component not closed: " + state['comptype'])
+        if not state['tzid']:
+            raise ValueError("mandatory TZID not found")
+        if not state['comps']:
+            raise ValueError("at least one component is needed")
+        self._vtz[state['tzid']] = _tzicalvtz(
+            state['tzid'], state['comps'])
+        state['in_vtimezone'] = False
+
+    def _finish_rfc_observance(self, value, state):
         if value != state['comptype']:
             raise ValueError("invalid component end: " + value)
         if not state['founddtstart']:
@@ -1423,33 +1427,38 @@ class tzical(object):
         state['comps'].append(comp)
         state['comptype'] = None
 
-    def _handle_rfc_component_property(self, name, value, parms, line, state):
+    def _handle_rfc_component_property(self, property_value, state):
+        name, value, parms, line = property_value
         if name == "DTSTART":
-            # DTSTART in VTIMEZONE takes a subset of valid RRULE values under
-            # RFC 5545.
-            for parm in parms:
-                if parm != 'VALUE=DATE-TIME':
-                    msg = ('Unsupported DTSTART param in VTIMEZONE: ' + parm)
-                    raise ValueError(msg)
-            state['rrulelines'].append(line)
-            state['founddtstart'] = True
+            self._handle_rfc_dtstart(parms, line, state)
         elif name in ("RRULE", "RDATE", "EXRULE", "EXDATE"):
             state['rrulelines'].append(line)
-        elif name == "TZOFFSETFROM":
-            if parms:
-                raise ValueError(
-                    "unsupported %s parm: %s " % (name, parms[0]))
-            state['tzoffsetfrom'] = self._parse_offset(value)
-        elif name == "TZOFFSETTO":
-            if parms:
-                raise ValueError("unsupported TZOFFSETTO parm: " + parms[0])
-            state['tzoffsetto'] = self._parse_offset(value)
+        elif name in ("TZOFFSETFROM", "TZOFFSETTO"):
+            self._handle_rfc_offset(name, value, parms, state)
         elif name == "TZNAME":
             if parms:
                 raise ValueError("unsupported TZNAME parm: " + parms[0])
             state['tzname'] = value
         elif name != "COMMENT":
             raise ValueError("unsupported property: " + name)
+
+    def _handle_rfc_dtstart(self, parms, line, state):
+        # DTSTART in VTIMEZONE takes a subset of valid RRULE values under
+        # RFC 5545.
+        for parm in parms:
+            if parm != 'VALUE=DATE-TIME':
+                msg = ('Unsupported DTSTART param in VTIMEZONE: ' + parm)
+                raise ValueError(msg)
+        state['rrulelines'].append(line)
+        state['founddtstart'] = True
+
+    def _handle_rfc_offset(self, name, value, parms, state):
+        if parms:
+            if name == "TZOFFSETFROM":
+                raise ValueError(
+                    "unsupported %s parm: %s " % (name, parms[0]))
+            raise ValueError("unsupported TZOFFSETTO parm: " + parms[0])
+        state[name.lower()] = self._parse_offset(value)
 
     def _handle_rfc_timezone_property(self, name, value, parms, state):
         if name == "TZID":

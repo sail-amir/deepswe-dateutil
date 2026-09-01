@@ -1136,36 +1136,44 @@ class _iterinfo(object):
         div, mod = divmod(wyearlen, 7)
         numweeks = div+mod//4
         for n in rr._byweekno:
-            if n < 0:
-                n += numweeks+1
-            if not (0 < n <= numweeks):
-                continue
-            if n > 1:
-                i = no1wkst+(n-1)*7
-                if no1wkst != firstwkst:
-                    i -= 7-firstwkst
-            else:
-                i = no1wkst
-            for j in range(7):
-                self.wnomask[i] = 1
-                i += 1
-                if self.wdaymask[i] == rr._wkst:
-                    break
-        if 1 in rr._byweekno:
-            # Check week number 1 of next year as well
-            # TODO: Check -numweeks for next year.
-            i = no1wkst+numweeks*7
-            if no1wkst != firstwkst:
-                i -= 7-firstwkst
-            if i < self.yearlen:
-                # If week starts in next year, we don't care about it.
-                for j in range(7):
-                    self.wnomask[i] = 1
-                    i += 1
-                    if self.wdaymask[i] == rr._wkst:
-                        break
+            self._add_week_number(n, numweeks, no1wkst, firstwkst)
+        self._add_next_year_week(numweeks, no1wkst, firstwkst)
         if no1wkst:
             self._add_previous_year_week(year, no1wkst)
+
+    def _add_week_number(self, n, numweeks, no1wkst, firstwkst):
+        if n < 0:
+            n += numweeks+1
+        if not (0 < n <= numweeks):
+            return
+
+        if n > 1:
+            i = no1wkst+(n-1)*7
+            if no1wkst != firstwkst:
+                i -= 7-firstwkst
+        else:
+            i = no1wkst
+        self._mark_week(i)
+
+    def _add_next_year_week(self, numweeks, no1wkst, firstwkst):
+        # Check week number 1 of next year as well.
+        # TODO: Check -numweeks for next year.
+        if 1 not in self.rrule._byweekno:
+            return
+
+        i = no1wkst+numweeks*7
+        if no1wkst != firstwkst:
+            i -= 7-firstwkst
+        if i < self.yearlen:
+            # If week starts in next year, we don't care about it.
+            self._mark_week(i)
+
+    def _mark_week(self, i):
+        for j in range(7):
+            self.wnomask[i] = 1
+            i += 1
+            if self.wdaymask[i] == self.rrule._wkst:
+                break
 
     def _add_previous_year_week(self, year, no1wkst):
         rr = self.rrule
@@ -1189,15 +1197,7 @@ class _iterinfo(object):
 
     def _rebuild_nweekday_mask(self, month):
         rr = self.rrule
-        ranges = []
-        if rr._freq == YEARLY:
-            if rr._bymonth:
-                for bymonth in rr._bymonth:
-                    ranges.append(self.mrange[bymonth-1:bymonth+1])
-            else:
-                ranges = [(0, self.yearlen)]
-        elif rr._freq == MONTHLY:
-            ranges = [self.mrange[month-1:month+1]]
+        ranges = self._nweekday_ranges(month)
         if not ranges:
             return
 
@@ -1215,6 +1215,17 @@ class _iterinfo(object):
                     i += (7-self.wdaymask[i]+wday) % 7
                 if first <= i <= last:
                     self.nwdaymask[i] = 1
+
+    def _nweekday_ranges(self, month):
+        rr = self.rrule
+        if rr._freq == YEARLY:
+            if rr._bymonth:
+                return [self.mrange[bymonth-1:bymonth+1]
+                        for bymonth in rr._bymonth]
+            return [(0, self.yearlen)]
+        if rr._freq == MONTHLY:
+            return [self.mrange[month-1:month+1]]
+        return []
 
     def _rebuild_easter_mask(self, year):
         self.eastermask = [0]*(self.yearlen+7)

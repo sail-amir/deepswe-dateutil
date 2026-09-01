@@ -261,38 +261,43 @@ class isoparser(object):
 
         pos = 4 + has_sep       # Skip '-' if it's there
         if dt_str[pos:pos + 1] == b'W':
-            # YYYY-?Www-?D?
-            pos += 1
-            weekno = int(dt_str[pos:pos + 2])
-            pos += 2
-
-            dayno = 1
-            if len(dt_str) > pos:
-                if (dt_str[pos:pos + 1] == self._DATE_SEP) != has_sep:
-                    raise ValueError('Inconsistent use of dash separator')
-
-                pos += has_sep
-
-                dayno = int(dt_str[pos:pos + 1])
-                pos += 1
-
-            base_date = self._calculate_weekdate(year, weekno, dayno)
+            base_date, pos = self._parse_isoweek(
+                dt_str, year, has_sep, pos)
         else:
-            # YYYYDDD or YYYY-DDD
-            if len(dt_str) - pos < 3:
-                raise ValueError('Invalid ordinal day')
-
-            ordinal_day = int(dt_str[pos:pos + 3])
-            pos += 3
-
-            if ordinal_day < 1 or ordinal_day > (365 + calendar.isleap(year)):
-                raise ValueError('Invalid ordinal day' +
-                                 ' {} for year {}'.format(ordinal_day, year))
-
-            base_date = date(year, 1, 1) + timedelta(days=ordinal_day - 1)
+            base_date, pos = self._parse_isoordinal(dt_str, year, pos)
 
         components = [base_date.year, base_date.month, base_date.day]
         return components, pos
+
+    def _parse_isoweek(self, dt_str, year, has_sep, pos):
+        # YYYY-?Www-?D?
+        pos += 1
+        weekno = int(dt_str[pos:pos + 2])
+        pos += 2
+
+        dayno = 1
+        if len(dt_str) > pos:
+            if (dt_str[pos:pos + 1] == self._DATE_SEP) != has_sep:
+                raise ValueError('Inconsistent use of dash separator')
+            pos += has_sep
+            dayno = int(dt_str[pos:pos + 1])
+            pos += 1
+
+        return self._calculate_weekdate(year, weekno, dayno), pos
+
+    def _parse_isoordinal(self, dt_str, year, pos):
+        # YYYYDDD or YYYY-DDD
+        if len(dt_str) - pos < 3:
+            raise ValueError('Invalid ordinal day')
+
+        ordinal_day = int(dt_str[pos:pos + 3])
+        pos += 3
+        if ordinal_day < 1 or ordinal_day > (365 + calendar.isleap(year)):
+            raise ValueError('Invalid ordinal day' +
+                             ' {} for year {}'.format(ordinal_day, year))
+
+        base_date = date(year, 1, 1) + timedelta(days=ordinal_day - 1)
+        return base_date, pos
 
     def _calculate_weekdate(self, year, week, day):
         """

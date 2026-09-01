@@ -1578,19 +1578,19 @@ class _rrulestr(object):
             # only once.
             if parm not in {"VALUE=DATE-TIME", "VALUE=DATE"}:
                 raise ValueError("unsupported parm: " + parm)
-            else:
-                if value_found:
-                    msg = ("Duplicate value parameter found in: " + parm)
-                    raise ValueError(msg)
-                value_found = True
+            if value_found:
+                msg = ("Duplicate value parameter found in: " + parm)
+                raise ValueError(msg)
+            value_found = True
 
         for datestr in date_value.split(','):
             date = parser.parse(datestr, ignoretz=ignoretz, tzinfos=tzinfos)
-            if TZID is not None:
-                if date.tzinfo is None:
-                    date = date.replace(tzinfo=TZID)
-                else:
-                    raise ValueError('DTSTART/EXDATE specifies multiple timezone')
+            if TZID is None:
+                datevals.append(date)
+                continue
+            if date.tzinfo is not None:
+                raise ValueError('DTSTART/EXDATE specifies multiple timezone')
+            date = date.replace(tzinfo=TZID)
             datevals.append(date)
 
         return datevals

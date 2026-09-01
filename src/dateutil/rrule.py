@@ -150,15 +150,14 @@ class rrulebase(object):
     def __getitem__(self, item):
         if self._cache_complete:
             return self._cache[item]
-        elif isinstance(item, slice):
+        if isinstance(item, slice):
             if item.step and item.step < 0:
                 return list(iter(self))[item]
-            else:
-                return list(itertools.islice(self,
-                                             item.start or 0,
-                                             item.stop or sys.maxsize,
-                                             item.step or 1))
-        elif item >= 0:
+            return list(itertools.islice(self,
+                                         item.start or 0,
+                                         item.stop or sys.maxsize,
+                                         item.step or 1))
+        if item >= 0:
             gen = iter(self)
             try:
                 for i in range(item+1):
@@ -166,18 +165,16 @@ class rrulebase(object):
             except StopIteration:
                 raise IndexError
             return res
-        else:
-            return list(iter(self))[item]
+        return list(iter(self))[item]
 
     def __contains__(self, item):
         if self._cache_complete:
             return item in self._cache
-        else:
-            for i in self:
-                if i == item:
-                    return True
-                elif i > item:
-                    return False
+        for i in self:
+            if i == item:
+                return True
+            if i > item:
+                return False
         return False
 
     # __len__() introduces a large performance penalty.
